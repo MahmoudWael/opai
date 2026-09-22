@@ -1,0 +1,1 @@
+{"name":"opai","version":"0.1.0","type":"module","bin":{"opai":"dist/cli.js"},"scripts":{"build":"tsc && chmod +x dist/cli.js","typecheck":"tsc --noEmit","test":"npm run build && node dist/opai.test.js"},"engines":{"node":">=22"},"dependencies":{"@inquirer/prompts":"^7.10.1"},"devDependencies":{"typescript":"^5.9.3","@types/node":"^24.0.0"}}

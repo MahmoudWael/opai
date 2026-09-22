@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+launcher=$(readlink -f -- "$0") || exit 1
+exec node "$(dirname -- "$launcher")/dist/cli.js" "$@"
