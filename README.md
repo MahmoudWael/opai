@@ -1,44 +1,321 @@
 # OPAI
 
-Minimal TypeScript CLI for assigned OpenProject tickets and native Claude Code or Codex sessions.
+**Browse tickets, launch a coding agent, and return to the exact conversation later.**
 
-## Setup
+OPAI is a small TypeScript terminal application that connects a ticket provider to Claude Code and OpenAI Codex. It shows your assigned OpenProject work packages and saved queries, launches the selected agent with a focused ticket prompt, and records the agent's native session for reliable resumption.
 
-Requires Node 22+, Claude Code and/or Codex. Run `npm install && npm run build` in this directory, then link the included launcher into a directory already on your PATH (or use `npm link` where global npm directories are writable). For this WSL setup, `~/.local/bin/opai` is linked to the project launcher. Copy `config.example.json` to `~/.config/opai/config.json`. Set the OpenProject URL, a stable `instanceId`, and the **numeric type IDs from your instance** for Bug and User Story. The type IDs can be read from `/api/v3/types` or a work package's `_links.type.href`. No token belongs in the JSON file.
+OpenProject is the provider included in V1. The ticket picker, agent launchers, and session store use a common ticket model so another provider can be added without rewriting the rest of the application.
+
+## Workflow
+
+```text
+opai
+  -> My tickets
+  -> #4521  Fix workflow step execution
+  -> Fix with Claude Code
+  -> fix openproject bug 4521
+
+Later:
+
+opai
+  -> My sessions
+  -> #4521  Fix workflow step execution
+  -> Resume Claude Code session
+```
+
+OPAI sends only these initial prompts:
+
+```text
+implement openproject user story <id>
+fix openproject bug <id>
+```
+
+Ticket details and implementation work remain the coding agent's responsibility.
+
+## Why OPAI?
+
+Coding agents can work from ticket IDs, but the surrounding workflow is still easy to lose:
+
+| Problem | What OPAI does |
+| --- | --- |
+| Finding the right assigned ticket interrupts terminal work | Presents assigned tickets and saved queries in a searchable picker |
+| Recreating ticket context produces long, inconsistent prompts | Sends one exact provider-generated prompt |
+| Agent conversations become detached from their tickets | Associates each ticket with verified native agent session IDs |
+| Returning later means searching agent history | Resumes the selected native conversation from **My sessions** |
+| Reopening a CLI can repeatedly call the ticket API | Caches ticket lists and queries on disk with explicit refresh actions |
+| Scripts may accidentally modify ticket data | Uses only `GET` requests for OpenProject data |
+
+## Features
+
+- Searchable assigned-ticket and saved-query lists
+- Bug and User Story actions based on stable type IDs from your OpenProject instance
+- Interactive Claude Code and Codex processes with normal permission prompts
+- Multiple native sessions per ticket
+- Exact-session resume in the original working directory
+- Recovery of existing native sessions whose first prompt matches the ticket exactly
+- Persistent ticket, query, and session data across terminals, tmux sessions, and WSL restarts
+- Eight-hour disk cache by default, plus explicit refresh actions
+- Pinned and recently opened saved queries stored locally
+- Local dashboard for ticket status, agent use, recent activity, and resumable work
+- Read-only OpenProject integration
+
+## Requirements
+
+- Node.js 22 or newer
+- npm
+- An OpenProject account with API access
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview), [OpenAI Codex](https://github.com/openai/codex), or both
+- Agent-side access to OpenProject for whichever agent you select
+
+OPAI is currently developed and tested on Ubuntu under WSL2. It launches agents as normal interactive child processes and does not change their permissions or global configuration.
+
+## Install from source
+
+OPAI is not published to npm yet. Install it from this repository:
+
+```sh
+git clone https://github.com/MahmoudWael/opai.git
+cd opai
+npm ci
+npm run build
+npm link
+```
+
+Confirm that the command is available:
+
+```sh
+opai
+```
+
+If global npm links are not writable, link the included launcher into a user-owned directory:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf "$PWD/opai" ~/.local/bin/opai
+```
+
+Ensure `~/.local/bin` is on your `PATH`. For example, add this to `~/.zshrc` or `~/.bashrc`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then open a new terminal or reload the shell configuration.
+
+## Configure OpenProject
+
+### 1. Create an API token
+
+In OpenProject, open **Account settings -> Access tokens**, select **+ API Token**, and copy the generated token. OpenProject displays a newly created token only once. See the official [OpenProject access-token guide](https://www.openproject.org/docs/user-guide/account-settings/access-tokens/).
+
+### 2. Create the OPAI configuration
 
 ```sh
 mkdir -p ~/.config/opai
 cp config.example.json ~/.config/opai/config.json
-ln -s "$PWD/opai" ~/.local/bin/opai # once, if ~/.local/bin is already on PATH
+```
+
+Edit `~/.config/opai/config.json`:
+
+```json
+{
+  "openproject": {
+    "url": "https://openproject.example.com",
+    "instanceId": "work",
+    "bugTypeId": 7,
+    "userStoryTypeId": 6
+  },
+  "cacheTtlHours": 8,
+  "cwd": "/home/you/projects/your-repository",
+  "agents": {
+    "claude": "claude",
+    "codex": "codex"
+  }
+}
+```
+
+Replace the sample values with values from your OpenProject instance:
+
+| Setting | Required | Meaning |
+| --- | --- | --- |
+| `openproject.url` | Yes | Base URL without `/api/v3` |
+| `openproject.instanceId` | Yes | Stable local name that distinguishes this OpenProject instance in session keys |
+| `openproject.bugTypeId` | Yes | Numeric type ID used by this instance for Bugs |
+| `openproject.userStoryTypeId` | Yes | Numeric type ID used by this instance for User Stories |
+| `cacheTtlHours` | No | Cache lifetime greater than `0` and at most `168` hours; defaults to `8` |
+| `cwd` | No | Working directory passed to agents; defaults to the directory where `opai` was started |
+| `agents.claude` | No | Claude executable name or absolute path |
+| `agents.codex` | No | Codex executable name or absolute path |
+
+OpenProject type IDs vary by instance. Read them from `/api/v3/types` or from a work package's `_links.type.href`. OPAI still displays unsupported ticket types, but it offers no Implement or Fix action until their type is mapped.
+
+Keep `instanceId` stable after sessions have been recorded. It forms part of the provider-qualified ticket key, such as `openproject@work:4521`.
+
+### 3. Save the token
+
+Run `opai`. On the first run, OPAI asks for the token with hidden input and writes it to:
+
+```text
+~/.config/opai/token
+```
+
+The file is created with owner-only permissions (`0600`) and is reused by future terminals. The token is never written to `config.json`, cache files, or logs.
+
+To replace it, delete `~/.config/opai/token` and run OPAI again. `OPENPROJECT_API_TOKEN` can also provide a temporary environment override.
+
+## Usage
+
+Start the interactive home screen:
+
+```sh
 opai
 ```
 
-On first run, OPAI asks for your OpenProject API token with hidden input and saves it to `~/.config/opai/token` with mode `0600`. Future terminals reuse that file automatically. To replace a token, delete the file and run `opai` again. If `OPENPROJECT_API_TOKEN` is set, it takes precedence over the file. OPAI never prints the token.
+Available shortcuts:
 
-Optional `cwd` in config sets the repository; otherwise OPAI uses the directory where you run it. Optional `agents.claude` and `agents.codex` select executable paths. `opai show <id>` and `opai resume <id>` are shortcuts.
+```sh
+opai mine             # Open assigned tickets
+opai show 4521        # Open one ticket
+opai resume 4521      # Choose a saved session for one ticket
+```
 
-OpenProject API v3 uses Basic auth with username `apikey` and the token as password. OPAI queries `/api/v3/users/me`, then filters work packages by that numeric assignee ID and open status. It follows collection pagination. Unsupported types are displayed but have no Implement/Fix action. The configured `instanceId` is part of each session key, so keep it stable.
+### Navigation
 
-The **Home** menu keeps **My tickets**, **Saved queries**, **My sessions**, and both Refresh actions visible. Its local quest dashboard shows cached ticket totals and status distribution, resumable tickets, Claude/Codex usage, seven-day agent activity, weekly tickets touched, tickets cleared from the assigned board, the open-ticket trend, last refresh, and the most recent session. “Cleared” means that a ticket disappeared between assigned-ticket snapshots; it can indicate completion or reassignment. Daily snapshots are stored in `~/.config/opai/dashboard-history.json`. Opening Home uses the disk cache and session registry and makes no OpenProject request.
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Move through a list |
+| Type | Filter tickets, queries, or sessions |
+| `Enter` | Open the selected item |
+| `Esc` | Return to the previous screen |
+| `Ctrl+C` | Exit OPAI |
 
-Open My tickets to load the list once. Press **Esc** to return from a ticket or list; the cached list is reused. Return to Home and choose **Refresh my tickets** when you want a new API read. Open Saved queries to list the queries visible to your API user. Type to search by name or ID; press **Esc** to go back without scrolling through results. Select a query and **Browse tickets** to read its results. Opening a query marks it as recent, and its menu lets you **Pin** or **Unpin** it. Pinned queries sort first, then recently opened queries. These preferences live in `~/.config/opai/query-preferences.json` and do not change OpenProject queries. **Refresh saved queries** updates query names; each query menu has **Refresh query results** for its own ticket list.
+### Home views
 
-**My sessions** lists tickets with recorded Claude or Codex sessions, sorted by last use. Each entry shows its saved ticket status, agents, conversation count, and time since it was last opened. Fresh ticket lists update matching saved session statuses. **Refresh my tickets** also checks saved tickets absent from the assigned list by ID, so closed tickets can receive their new status. If OpenProject cannot return one of them, OPAI keeps its previous status and reports the ticket ID. Opening My sessions makes no API request. Older records without a ticket snapshot show **Status unavailable** until a refresh finds them. Select a ticket to choose and resume its native session without loading tickets from OpenProject. If a ticket has no Resume action despite an earlier agent conversation, select **Find existing native session** in that ticket's menu. OPAI searches local native sessions whose first user prompt exactly matches the ticket, then lets you choose which one to record. The Resume action appears after recording it.
+- **My tickets** reads assigned, open OpenProject work packages.
+- **Saved queries** reads the queries visible to your OpenProject account. Pinning and recent-query ordering are local preferences and never alter the remote query.
+- **My sessions** opens recorded conversations without fetching tickets again.
+- **Refresh my tickets** bypasses the cache and updates matching statuses in saved sessions.
+- **Refresh saved queries** reloads query names. Each query also has its own result refresh action.
 
-Lists are cached on disk under `~/.config/opai/cache/`, so reopening OPAI in another terminal reuses a fresh list without an API request. The default time to live is **8 hours**; set `"cacheTtlHours": 8` in `config.json` to change it (up to 168 hours). After expiry, the next time you open that list OPAI fetches it again. Refresh always fetches immediately. My tickets, saved query names, and each query's ticket results have separate cache entries. Cache entries are scoped to the OpenProject instance, type mapping, and API token, and contain no token. Cached files are written with owner-only permissions.
+## Native session tracking
 
-In the ticket picker, type an ID or title to filter, use ↑/↓ to move, and press Enter to open. Press Esc to return to the previous menu, or press Ctrl+C to exit. OPAI uses color when the terminal supports it and respects `NO_COLOR`.
+OPAI does not create a separate chat-history format. It records identifiers for the agents' own native conversations in `~/.config/opai/sessions.json`.
 
-On a normal exit or Ctrl+C at a prompt, the mascot waves goodbye. Saved sessions remain on disk.
+### Claude Code
 
-The header has a small chibi RPG mascot and a status strip. During an OpenProject request, the mascot and spinner animate on interactive terminals. Afterward, the strip shows the loaded count or an error. Reading a valid disk cache shows a cached status. Non-interactive output stays still and readable.
+OPAI assigns a UUID with Claude's native `--session-id` option, launches the exact ticket prompt, and saves the association only after Claude creates the corresponding native session. Resume uses Claude's native `--resume` option.
 
-OPAI uses only `GET` requests to OpenProject. It does not create, edit, delete, or update tickets or queries, and it does not override saved query filters. Agents launched by OPAI run under their own MCP configuration and permission rules; OPAI does not control what those agents can do through MCP.
+### Codex
 
-## Sessions
+Codex does not currently expose an equivalent interactive launch option for assigning a session ID. OPAI compares native Codex session metadata before and after launch and records a session only when exactly one new session matches both:
 
-Claude Code 2.1.278 accepts `--session-id <uuid>` at launch and `--resume <uuid>` later. OPAI assigns a UUID, then records it only if Claude created its native session file. Codex 0.155.1 accepts `resume <uuid>` but has no documented interactive launch option to assign or report a UUID. OPAI inspects newly created Codex session metadata while the agent runs and after exit, and saves an ID only if exactly one new native session matches the first user prompt and working directory. OPAI remains alive when Ctrl+C stops an agent, so it can finish recording. Codex capture and older-session recovery depend on local JSONL metadata; if that format changes or multiple sessions match, OPAI reports that it could not verify the ID and saves nothing. It never selects the newest session by time alone. Sessions are stored atomically in `~/.config/opai/sessions.json`; existing ticket sessions are retained.
+- the original working directory; and
+- the exact initial ticket prompt.
 
-The Codex installation checked here has no OpenProject MCP server (`codex mcp list` showed only `chrome-devtools`). Configure OpenProject access in Codex separately before using its ticket prompts. OPAI does not alter global agent settings. Claude Code's OpenProject MCP connection was found in its existing configuration.
+Resume uses Codex's native `resume` command. This capture depends on Codex's local JSONL metadata format and may need updating if that format changes.
 
-Run `npm test` for mocked API, normalization, prompt, session, and launcher checks. Live OpenProject and agent runs need your credentials and interactive terminal and were not part of automated tests.
+### Safety guarantees
+
+- OPAI never invents a session ID.
+- It never associates a ticket based only on the newest session timestamp.
+- Multiple sessions for the same ticket are retained.
+- Resume uses the session's original working directory.
+- A missing native session or working directory produces an error instead of starting a new conversation.
+- If automatic capture fails, **Find existing native session** searches for conversations whose first prompt exactly matches the selected ticket.
+
+## Cache and local data
+
+OPAI stores local state below `~/.config/opai/`:
+
+| Path | Purpose |
+| --- | --- |
+| `config.json` | OpenProject and agent settings |
+| `token` | API token with owner-only permissions |
+| `sessions.json` | Ticket-to-native-session associations |
+| `cache/` | Assigned tickets, saved queries, and query results |
+| `query-preferences.json` | Pinned and recently opened queries |
+| `dashboard-history.json` | Daily local snapshots used by dashboard statistics |
+
+Opening OPAI does not automatically call OpenProject while a valid cached list exists. The default cache lifetime is eight hours, so reopening it in another terminal reuses the same list. After expiry, the next access reloads that list. Refresh actions always fetch immediately.
+
+Cache namespaces include the provider identity, URL, type mapping, and a one-way hash derived from the token. Cache files do not contain the token.
+
+## Read-only OpenProject access
+
+OPAI sends only `GET` requests to OpenProject API v3. It reads:
+
+- the authenticated user;
+- assigned open work packages;
+- individual work packages;
+- saved-query definitions; and
+- saved-query results.
+
+It does not create, edit, delete, or change tickets or saved queries.
+
+Launched agents run with their own configuration and permission rules. If Claude Code or Codex has write access through MCP, those capabilities belong to the agent and remain outside OPAI's read-only API integration. OPAI does not install or modify MCP servers.
+
+## Architecture
+
+```text
+TicketProvider
+  -> OpenProjectProvider
+  -> normalized Ticket
+       -> interactive picker
+       -> Claude/Codex adapter
+       -> native session registry
+```
+
+The `TicketProvider` contract handles listing and retrieving tickets, normalization, and construction of Implement or Fix prompts. UI, agent execution, caching, and session storage do not depend on OpenProject response shapes.
+
+V1 intentionally includes one static provider implementation. It has no plugin loader, background service, database, tmux management, ticket modification, branch management, or pull-request automation.
+
+## Known limitations
+
+- OpenProject is the only ticket provider included in V1.
+- Bug and User Story type IDs must be configured for each OpenProject instance.
+- Claude Code and Codex must already be installed and authenticated.
+- Each agent needs its own OpenProject integration. A working Claude MCP setup does not imply that Codex has the same MCP server.
+- Native session files must remain present for resume to work.
+- Codex capture relies on locally stored native metadata because its interactive launcher does not provide an explicit session-ID option.
+- Distribution is currently source-only; there is no npm release or platform installer.
+
+## Troubleshooting
+
+### `Create ~/.config/opai/config.json from config.example.json`
+
+Create the configuration file and replace every sample OpenProject value with the values from your instance.
+
+### `OpenProject API returned HTTP 401`
+
+Delete `~/.config/opai/token`, run `opai`, and enter a valid API token. Also confirm that API access is enabled by your OpenProject administrator.
+
+### `Could not connect to OpenProject`
+
+Check `openproject.url`, DNS, VPN access, and TLS. The URL should look like `https://openproject.example.com` without `/api/v3` appended.
+
+### A ticket has no Implement or Fix action
+
+Check the work package's numeric type ID and update `bugTypeId` or `userStoryTypeId`. The visible type name alone is not used for action mapping.
+
+### No session was recorded
+
+OPAI saves a session only after verifying a native ID. Reopen the ticket and select **Find existing native session**. If nothing is found, confirm that the agent created a native session with the exact initial prompt and that its local session files are still available.
+
+### Codex cannot retrieve the ticket
+
+Configure OpenProject access for Codex separately. OPAI deliberately does not change global agent or MCP configuration.
+
+## Development
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+Tests mock OpenProject responses and child-process behavior. They do not require live OpenProject credentials and do not launch real coding agents.
+
+## Support and contributions
+
+Use [GitHub Issues](https://github.com/MahmoudWael/opai/issues) for bug reports, setup problems, and focused feature proposals. When reporting a session-capture problem, include the agent name and version, operating environment, and the OPAI error message. Never include API tokens or private ticket contents.
