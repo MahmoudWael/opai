@@ -123,7 +123,7 @@ export function renderDashboard(model: DashboardModel, columns = process.stdout.
   const recent = model.recent ? `#${model.recent.id}  ${fit(model.recent.title, Math.max(10, columns - recentMeta.length - model.recent.id.length - 7)).trimEnd()}${recentMeta}` : 'No agent activity yet';
   const lines = [
     `  ⚔  Open ${model.open}   🐞 Bugs ${model.bugs}   📜 Stories ${model.stories}   ✦ Sessions ${model.sessions}   ↻ ${model.refreshedAt ? ago(model.refreshedAt, now) : 'never'}`,
-    `  ⛨  ${model.resumable} ticket${model.resumable === 1 ? '' : 's'} ready to resume`,
+    `  ▶  ${model.resumable} ticket${model.resumable === 1 ? '' : 's'} ready to resume`,
     '', '  QUEST STATUS',
     ...statusRows,
     '', `  ${fit('AGENT PARTY', half)} WEEKLY QUESTS`,
