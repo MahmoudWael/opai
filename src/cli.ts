@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
-import { password, select, search } from '@inquirer/prompts';
+import { input, password, select, search } from '@inquirer/prompts';
 import { loadConfig } from './config.js';
 import { OpenProjectProvider } from './providers/openproject.js';
-import { ticketKey, type SavedQuery, type Ticket, type TicketProvider } from './providers/types.js';
+import { ticketKey, type PromptKind, type SavedQuery, type Ticket, type TicketProvider } from './providers/types.js';
 import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
 import { loadApiToken, saveApiToken, tokenPath } from './token.js';
 import { SessionStore, sessionTickets, type Session } from './sessions/store.js';
@@ -14,10 +14,14 @@ import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessi
 import { codexLaunch, codexResume, codexSessionFiles, findCodexTicketSessions, identifyCodexSession, nativeCodexSessionExists } from './agents/codex.js';
 import { runAgent } from './agents/run.js';
 import type { Agent } from './agents/types.js';
-import { goodbye, hint, listHighlight, muted, screen, sessionRow, ticketRow, warning } from './ui.js';
+import { accent, bold, goodbye, good, hint, listHighlight, muted, screen, sessionRow, ticketRow, warning } from './ui.js';
 import { statusBar } from './status.js';
 import { BACK, promptWithBack } from './back.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
+import { LaunchPreferenceStore, type AgentLaunchDefaults } from './launch-preferences.js';
+import { modelLabel, resolvePreferredModel, type ModelPreference } from './models.js';
+import { availableEfforts, discoverAgentCapabilities, resolveEffort, type AgentCapabilities } from './agents/capabilities.js';
+import { buildLaunchMenu, editablePromptConfig, type LaunchAction } from './launch-menu.js';
 function aborted(error: unknown): boolean { return error instanceof Error && error.name === 'ExitPromptError'; }
 const listTheme = { style: { highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · Esc back` } };
 async function directoryExists(path: string): Promise<boolean> { try { return (await stat(path)).isDirectory(); } catch { return false; } }
@@ -40,6 +44,7 @@ async function main(): Promise<void> {
   const store = new SessionStore();
   const dashboardHistory = new DashboardHistoryStore();
   const queryPreferences = new QueryPreferencesStore();
+  const launchPreferences = new LaunchPreferenceStore();
   const namespace = createHash('sha256').update(JSON.stringify([provider.identity, config.openproject.url, config.openproject.bugTypeId, config.openproject.userStoryTypeId, apiToken])).digest('hex');
   const cacheTtlMs = (config.cacheTtlHours ?? 8) * 60 * 60 * 1000;
   const ticketCache = new ListCache<Ticket[]>(namespace, cacheTtlMs, isTicketList);
@@ -67,18 +72,105 @@ async function main(): Promise<void> {
   const cwd = config.cwd ?? process.cwd();
   if (!await directoryExists(cwd)) throw new Error(`Working directory does not exist: ${cwd}`);
   const executables = { claude: config.agents?.claude ?? 'claude', codex: config.agents?.codex ?? 'codex' };
-  async function launch(ticket: Ticket, agent: Agent): Promise<void> {
-    const prompt = provider.prompt(ticket, ticket.type === 'Bug' ? 'fix' : 'implement');
+  const configuredModels: Record<Agent, string[]> = { claude: config.models?.claude ?? [], codex: config.models?.codex ?? [] };
+  const capabilityCache: Partial<Record<Agent, Promise<AgentCapabilities>>> = {};
+  const agentName = (agent: Agent) => agent === 'claude' ? 'Claude Code' : 'Codex';
+  const promptKind = (ticket: Ticket): PromptKind => ticket.type === 'Bug' ? 'bug' : 'userStory';
+  const ticketAction = (ticket: Ticket) => ticket.type === 'Bug' ? 'fix' as const : 'implement' as const;
+  const effortLabel = (effort: string | null) => effort === null ? 'Default' : effort[0]!.toUpperCase() + effort.slice(1);
+  async function capabilities(agent: Agent): Promise<AgentCapabilities> {
+    capabilityCache[agent] ??= discoverAgentCapabilities(agent, executables[agent], configuredModels[agent]);
+    return capabilityCache[agent]!;
+  }
+  function modelDisplay(model: ModelPreference, caps?: AgentCapabilities): string {
+    if (model === null) return 'Default';
+    const found = caps?.models.find(item => item.id === model);
+    return found && found.label !== found.id ? `${found.label} · ${found.id}` : found?.label ?? model;
+  }
+  async function selectModel(agent: Agent, current: ModelPreference, caps: AgentCapabilities): Promise<ModelPreference | typeof BACK> {
+    return promptWithBack(signal => select<ModelPreference>({ message: `${agentName(agent)} model`, pageSize: 12, default: current, choices: [
+      { name: `${muted('◇  Default')}${current === null ? good(' · current') : ''}`, value: null },
+      ...caps.models.map(model => ({ name: `${accent('◈')}  ${bold(modelDisplay(model.id, caps))}${model.id === current ? good(' · current') : ''}`, value: model.id }))
+    ] }, { signal }));
+  }
+  async function selectEffort(agent: Agent, current: string | null, model: ModelPreference, caps: AgentCapabilities): Promise<string | null | typeof BACK> {
+    const efforts = availableEfforts(caps, model);
+    const agentDefault = model === null ? undefined : caps.models.find(item => item.id === model)?.defaultEffort;
+    return promptWithBack(signal => select<string | null>({ message: `${agentName(agent)} effort`, pageSize: 10, default: current, choices: [
+      { name: `${muted('◇  Default')}${agentDefault ? muted(` · agent uses ${effortLabel(agentDefault)}`) : ''}${current === null ? good(' · current') : ''}`, value: null },
+      ...efforts.map(effort => ({ name: `${warning('✦')}  ${bold(effortLabel(effort))}${effort === current ? good(' · current') : ''}`, value: effort }))
+    ] }, { signal }));
+  }
+  interface LaunchSelection { model: ModelPreference; effort: string | null; template: string }
+  async function launchOptions(ticket: Ticket, agent: Agent): Promise<LaunchSelection | undefined> {
+    const caps = await capabilities(agent);
+    const preferences = await launchPreferences.all();
+    const kind = promptKind(ticket);
+    let model = preferences.agents[agent].model;
+    let effort = preferences.agents[agent].effort;
+    let template = preferences.prompts[provider.identity]?.[kind] ?? provider.promptTemplate(kind);
+    let focusedAction: LaunchAction = 'start';
+    while (true) {
+      let preview: string;
+      try { preview = provider.prompt(ticket, ticketAction(ticket), template); }
+      catch (error) { preview = error instanceof Error ? error.message : String(error); }
+      const capsEfforts = availableEfforts(caps, model);
+      const modelAvailable = model === null || caps.models.some(item => item.id === model);
+      const effortAvailable = effort === null || capsEfforts.includes(effort);
+      screen(`Start ${agentName(agent)} · #${ticket.id}`, `${ticket.typeLabel} · ${ticket.title}`, agent);
+      console.log(`  ${muted(`Tip: {{id}} becomes ${ticket.id}`)}`);
+      console.log(`  ${muted(`Will send: ${preview}`)}\n`);
+      const menu = buildLaunchMenu(modelDisplay(model, caps), effortLabel(effort), template, focusedAction, { model: modelAvailable, effort: effortAvailable });
+      const choice = await promptWithBack(signal => select<LaunchAction>({ message: 'Launch options', pageSize: 8, ...menu }, { signal }));
+      if (choice === BACK) return undefined;
+      focusedAction = choice;
+      if (choice === 'model') {
+        const selected = await selectModel(agent, model, caps);
+        if (selected !== BACK) {
+          model = selected;
+          const validEfforts = availableEfforts(caps, model);
+          if (effort !== null && !validEfforts.includes(effort)) {
+            effort = null;
+            statusBar.set('cached', 'Effort returned to Default for the selected model');
+          }
+        }
+      } else if (choice === 'effort') {
+        const selected = await selectEffort(agent, effort, model, caps);
+        if (selected !== BACK) effort = selected;
+      } else if (choice === 'prompt') {
+        const selected = await promptWithBack(signal => input(editablePromptConfig('Initial prompt template', template), { signal }));
+        if (selected !== BACK) template = selected;
+      } else if (choice === 'reset-prompt') {
+        template = provider.promptTemplate(kind);
+        statusBar.set('success', `${ticket.typeLabel} prompt restored to configured default`);
+      } else if (choice === 'save') {
+        resolvePreferredModel(agent, model, caps.models.map(item => item.id));
+        resolveEffort(effort, availableEfforts(caps, model));
+        provider.prompt(ticket, ticketAction(ticket), template);
+        await launchPreferences.setAgent(agent, { model, effort });
+        await launchPreferences.setPrompt(provider.identity, kind, template);
+        statusBar.set('success', `${agentName(agent)} and ${ticket.typeLabel} defaults saved`);
+      } else {
+        const resolvedModel = resolvePreferredModel(agent, model, caps.models.map(item => item.id));
+        const resolvedEffort = resolveEffort(effort, availableEfforts(caps, model));
+        provider.prompt(ticket, ticketAction(ticket), template);
+        return { model: resolvedModel, effort: resolvedEffort, template };
+      }
+    }
+  }
+  async function launch(ticket: Ticket, agent: Agent, selection: LaunchSelection): Promise<void> {
+    const prompt = provider.prompt(ticket, ticketAction(ticket), selection.template);
+    const { model, effort } = selection;
     const id: string | undefined = agent === 'claude' ? randomUUID() : undefined;
     const before = agent === 'codex' ? await codexSessionFiles() : undefined;
     const started = new Date().toISOString();
-    const spec = agent === 'claude' ? claudeLaunch(executables.claude, cwd, prompt, id!) : codexLaunch(executables.codex, cwd, prompt);
+    const spec = agent === 'claude' ? claudeLaunch(executables.claude, cwd, prompt, id!, model, effort) : codexLaunch(executables.codex, cwd, prompt, model, effort);
     let savedId: string | undefined;
     const record = async () => {
       if (savedId) return;
       const sessionId = agent === 'claude' ? id : await identifyCodexSession(before!, await codexSessionFiles(), cwd, prompt);
-      if (!sessionId || !await nativeExists({ agent, sessionId, cwd, createdAt: started })) return;
-      await store.add(ticketKey(ticket), { agent, sessionId, cwd, createdAt: started, lastUsedAt: new Date().toISOString(), ticket });
+      if (!sessionId || !await nativeExists({ agent, sessionId, cwd, model, effort, initialPrompt: prompt, createdAt: started })) return;
+      await store.add(ticketKey(ticket), { agent, sessionId, cwd, model, effort, initialPrompt: prompt, createdAt: started, lastUsedAt: new Date().toISOString(), ticket });
       savedId = sessionId;
     };
     const code = await runAgent(spec, record);
@@ -87,8 +179,74 @@ async function main(): Promise<void> {
     else console.log(`No verified ${agent} session ID was found; no association saved.`);
     if (code !== 0) console.log(`${agent} exited with code ${code}.`);
   }
+  async function agentDefaultsMenu(agent: Agent): Promise<void> {
+    const caps = await capabilities(agent);
+    let focusedOption: 'model' | 'effort' = 'model';
+    while (true) {
+      const current = (await launchPreferences.all()).agents[agent];
+      screen(`${agentName(agent)} defaults`, caps.discovered ? 'Models and effort read from the installed CLI' : 'Using configured models because local discovery was unavailable', agent);
+      const choice = await promptWithBack(signal => select<'model' | 'effort'>({ message: 'Choose a default', pageSize: 5, default: focusedOption, choices: [
+        { name: `◈  Model · ${accent(bold(modelDisplay(current.model, caps)))}`, value: 'model' },
+        { name: `✦  Effort · ${warning(bold(effortLabel(current.effort)))}`, value: 'effort' }
+      ] }, { signal }));
+      if (choice === BACK) return;
+      focusedOption = choice;
+      let next: AgentLaunchDefaults = current;
+      if (choice === 'model') {
+        const selected = await selectModel(agent, current.model, caps);
+        if (selected === BACK) continue;
+        const efforts = availableEfforts(caps, selected);
+        next = { model: selected, effort: current.effort !== null && !efforts.includes(current.effort) ? null : current.effort };
+      } else {
+        const selected = await selectEffort(agent, current.effort, current.model, caps);
+        if (selected === BACK) continue;
+        next = { ...current, effort: selected };
+      }
+      await launchPreferences.setAgent(agent, next);
+      statusBar.set('success', `${agentName(agent)} defaults saved`);
+    }
+  }
+  async function promptDefaultsMenu(kind: PromptKind): Promise<void> {
+    while (true) {
+      const preferences = await launchPreferences.all();
+      const configured = provider.promptTemplate(kind);
+      const current = preferences.prompts[provider.identity]?.[kind] ?? configured;
+      const label = kind === 'bug' ? 'Bug' : 'User Story';
+      screen(`${label} prompt default`, current);
+      const choice = await promptWithBack(signal => select({ message: 'Prompt template', pageSize: 5, choices: [
+        { name: 'Edit prompt template', value: 'edit' },
+        { name: 'Use configured provider template', value: 'reset' }
+      ] }, { signal }));
+      if (choice === BACK) return;
+      if (choice === 'reset') await launchPreferences.setPrompt(provider.identity, kind, null);
+      else {
+        const selected = await promptWithBack(signal => input(editablePromptConfig(`${label} prompt template`, current), { signal }));
+        if (selected === BACK) continue;
+        await launchPreferences.setPrompt(provider.identity, kind, selected);
+      }
+      statusBar.set('success', `${label} prompt default saved`);
+    }
+  }
+  async function launchDefaultsMenu(): Promise<void> {
+    while (true) {
+      const preferences = await launchPreferences.all();
+      screen('Launch defaults', 'Preselected for new sessions · every launch can override them');
+      const choice = await promptWithBack(signal => select({ message: 'Choose a default', pageSize: 7, choices: [
+        { name: `Claude Code · ${modelLabel(preferences.agents.claude.model)} · ${effortLabel(preferences.agents.claude.effort)}`, value: 'claude' },
+        { name: `Codex · ${modelLabel(preferences.agents.codex.model)} · ${effortLabel(preferences.agents.codex.effort)}`, value: 'codex' },
+        { name: 'Bug prompt template', value: 'bug' },
+        { name: 'User Story prompt template', value: 'userStory' }
+      ] }, { signal }));
+      if (choice === BACK) return;
+      if (choice === 'claude' || choice === 'codex') await agentDefaultsMenu(choice);
+      else await promptDefaultsMenu(choice as PromptKind);
+    }
+  }
   async function recover(ticket: Ticket): Promise<void> {
-    const prompt = provider.prompt(ticket, ticket.type === 'Bug' ? 'fix' : 'implement');
+    const kind = promptKind(ticket);
+    const preferences = await launchPreferences.all();
+    const template = preferences.prompts[provider.identity]?.[kind] ?? provider.promptTemplate(kind);
+    const prompt = provider.prompt(ticket, ticketAction(ticket), template);
     screen(`#${ticket.id}  Find native session`, 'Sessions whose first user prompt exactly matches this ticket');
     const candidates = [...await findClaudeTicketSessions(prompt), ...await findCodexTicketSessions(prompt)];
     const available = (await Promise.all(candidates.map(async candidate => await directoryExists(candidate.cwd) ? candidate : undefined)))
@@ -96,7 +254,7 @@ async function main(): Promise<void> {
     const existing = await store.list(ticketKey(ticket));
     const matches = available.filter(candidate => !existing.some(session => session.agent === candidate.agent && session.sessionId === candidate.sessionId));
     if (!matches.length) { console.log('No unrecorded native session with this exact ticket prompt was found.'); return; }
-    const index = await promptWithBack(signal => select({ message: 'Record a session for this ticket', pageSize: 12, theme: listTheme, choices: matches.map((candidate, index) => ({ name: `${candidate.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(candidate.createdAt).toLocaleString()} · ${candidate.cwd}`, value: index })) }, { signal }));
+    const index = await promptWithBack(signal => select({ message: 'Record a session for this ticket', pageSize: 12, choices: matches.map((candidate, index) => ({ name: `${candidate.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(candidate.createdAt).toLocaleString()} · ${candidate.cwd}`, value: index })) }, { signal }));
     if (index === BACK) return;
     const candidate = matches[index]!;
     if (!await directoryExists(candidate.cwd) || !await nativeExists(candidate)) { console.log('Native session or working directory is no longer available.'); return; }
@@ -106,12 +264,13 @@ async function main(): Promise<void> {
   async function resumeForKey(key: string, title: string, confirmSingle = false): Promise<void> {
     const sessions = await store.list(key);
     if (!sessions.length) { console.log('No session recorded for this ticket.'); return; }
-    if (sessions.length > 1 || confirmSingle) screen(title, 'Choose a saved conversation');
-    const index = sessions.length === 1 && !confirmSingle ? 0 : await promptWithBack(signal => select({ message: 'Resume session', pageSize: 12, theme: listTheme, choices: sessions.map((s, index) => ({ name: `${s.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(s.lastUsedAt ?? s.createdAt).toLocaleString()} · ${s.cwd}`, value: index })) }, { signal }));
+    if (sessions.length > 1 || confirmSingle) screen(title, 'Choose a saved conversation', 'resume');
+    const index = sessions.length === 1 && !confirmSingle ? 0 : await promptWithBack(signal => select({ message: 'Resume session', pageSize: 12, choices: sessions.map((s, index) => ({ name: `${s.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(s.lastUsedAt ?? s.createdAt).toLocaleString()} · ${s.cwd}`, value: index })) }, { signal }));
     const session = index === BACK ? undefined : sessions[index];
     if (!session) return;
     if (!await directoryExists(session.cwd)) { console.log(`Working directory no longer exists: ${session.cwd}`); return; }
     if (!await nativeExists(session)) { console.log(`Native ${session.agent} session ${session.sessionId} is missing or inaccessible.`); return; }
+    screen(`Resume ${session.agent === 'claude' ? 'Claude Code' : 'Codex'}`, title, 'resume');
     const spec = session.agent === 'claude' ? claudeResume(executables.claude, session.cwd, session.sessionId) : codexResume(executables.codex, session.cwd, session.sessionId);
     const code = await runAgent(spec);
     if (code === 0 || code === 130) await store.touch(key, session.sessionId);
@@ -123,14 +282,22 @@ async function main(): Promise<void> {
       const sessions = await store.list(ticketKey(ticket));
       const action = ticket.type === 'Bug' ? 'Fix' : 'Implement';
       const choices = ticket.type === 'Unsupported' ? [] : [
-        { name: `${action} with Claude Code`, value: 'claude', description: 'Start a new native Claude session' },
-        { name: `${action} with Codex`, value: 'codex', description: 'Start a new native Codex session' }
+        { name: `${action} with Claude Code`, value: 'claude', description: 'Review launch options, then start a native Claude session' },
+        { name: `${action} with Codex`, value: 'codex', description: 'Review launch options, then start a native Codex session' }
       ];
       if (ticket.type === 'Unsupported') console.log(`  ${warning('No action mapped for this ticket type.')} ${muted('Set its type ID in config.json to enable it.')}\n`);
       console.log(`  ${muted('↑↓ move · Enter select · Esc back · Ctrl+C exit')}\n`);
-      const choice = await promptWithBack(signal => select({ message: 'Choose an action', pageSize: 8, theme: listTheme, choices: [...choices, ...(sessions.length ? [{ name: `Resume saved session${sessions.length > 1 ? `s (${sessions.length})` : ''}`, value: 'resume' }] : []), ...(ticket.type !== 'Unsupported' ? [{ name: 'Find existing native session', value: 'recover' }] : [])] }, { signal }));
+      const choice = await promptWithBack(signal => select({ message: 'Choose an action', pageSize: 8, choices: [...choices, ...(sessions.length ? [{ name: `Resume saved session${sessions.length > 1 ? `s (${sessions.length})` : ''}`, value: 'resume' }] : []), ...(ticket.type !== 'Unsupported' ? [{ name: 'Find existing native session', value: 'recover' }] : [])] }, { signal }));
       if (choice === BACK) return;
-      try { if (choice === 'resume') await resumeForKey(ticketKey(ticket), `#${ticket.id} ${ticket.title}`); else if (choice === 'recover') await recover(ticket); else await launch(ticket, choice as Agent); }
+      try {
+        if (choice === 'resume') await resumeForKey(ticketKey(ticket), `#${ticket.id} ${ticket.title}`);
+        else if (choice === 'recover') await recover(ticket);
+        else {
+          const agent = choice as Agent;
+          const options = await launchOptions(ticket, agent);
+          if (options) await launch(ticket, agent, options);
+        }
+      }
       catch (error) { console.error(error instanceof Error ? error.message : String(error)); }
     }
   }
@@ -163,7 +330,7 @@ async function main(): Promise<void> {
     while (true) {
       screen(query.name, 'Saved query · ticket results load on first open');
       const pinned = Boolean((await queryPreferences.all())[`${provider.identity}:${query.id}`]?.pinned);
-      const choice = await promptWithBack(signal => select({ message: 'What would you like to do?', theme: listTheme, choices: [
+      const choice = await promptWithBack(signal => select({ message: 'What would you like to do?', choices: [
         { name: 'Browse tickets', value: 'browse' },
         { name: '↻  Refresh query results', value: 'refresh' },
         { name: pinned ? '★  Unpin query' : '☆  Pin query', value: 'pin' }
@@ -226,6 +393,7 @@ async function main(): Promise<void> {
       { name: 'My tickets', value: 'mine' },
       { name: 'Saved queries', value: 'queries' },
       { name: 'My sessions', value: 'sessions' },
+      { name: 'Launch defaults', value: 'launch-defaults' },
       { name: '↻  Refresh my tickets', value: 'refresh-mine' },
       { name: '↻  Refresh saved queries', value: 'refresh-queries' },
       { name: '×  Exit OPAI', value: 'exit' }
@@ -235,6 +403,7 @@ async function main(): Promise<void> {
       if (choice === 'mine') await browseTickets('mine', 'My tickets', () => provider.listAssigned());
       else if (choice === 'queries') await savedQueries();
       else if (choice === 'sessions') await mySessions();
+      else if (choice === 'launch-defaults') await launchDefaultsMenu();
       else if (choice === 'refresh-mine') {
         await cachedTickets('mine', () => provider.listAssigned(), 'my tickets', true, true);
       } else {

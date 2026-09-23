@@ -1,1 +1,22 @@
-{"openproject":{"url":"https://openproject.example.com","instanceId":"main","bugTypeId":1,"userStoryTypeId":2},"cacheTtlHours":8,"defaultAgent":"claude","agents":{"claude":"claude","codex":"codex"}}
+{
+  "openproject": {
+    "url": "https://openproject.example.com",
+    "instanceId": "main",
+    "bugTypeId": 1,
+    "userStoryTypeId": 2,
+    "promptTemplates": {
+      "bug": "fix openproject bug {{id}}",
+      "userStory": "implement openproject user story {{id}}"
+    }
+  },
+  "cacheTtlHours": 8,
+  "defaultAgent": "claude",
+  "agents": {
+    "claude": "claude",
+    "codex": "codex"
+  },
+  "models": {
+    "claude": [],
+    "codex": []
+  }
+}

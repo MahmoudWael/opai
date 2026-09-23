@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { configDir } from '../config.js';
 import { ticketKey, type Ticket } from '../providers/types.js';
-export interface Session { agent: 'claude' | 'codex'; sessionId: string; cwd: string; createdAt: string; lastUsedAt?: string; usedAt?: string[]; ticket?: Ticket }
+export interface Session { agent: 'claude' | 'codex'; sessionId: string; cwd: string; model?: string | null; effort?: string | null; initialPrompt?: string | null; createdAt: string; lastUsedAt?: string; usedAt?: string[]; ticket?: Ticket }
 export type Registry = Record<string, Session[]>;
 export interface TicketSessions { key: string; id: string; title: string; status?: string; sessions: Session[]; lastUsedAt: string }
 export function sessionTickets(registry: Registry, provider: string): TicketSessions[] {
@@ -20,7 +20,7 @@ export class SessionStore {
     try { const value: unknown = JSON.parse(await readFile(this.path, 'utf8')); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid session registry.'); return value as Registry; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error; }
   }
-  async list(key: string): Promise<Session[]> { return (await this.all())[key] ?? []; }
+  async list(key: string): Promise<Session[]> { return ((await this.all())[key] ?? []).map(session => ({ ...session, model: session.model ?? null, effort: session.effort ?? null, initialPrompt: session.initialPrompt ?? null })); }
   async syncTickets(tickets: Ticket[]): Promise<number> {
     const data = await this.all();
     let updated = 0;

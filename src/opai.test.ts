@@ -9,7 +9,7 @@ import { SessionStore, sessionTickets } from './sessions/store.js';
 import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessionExists } from './agents/claude.js';
 import { codexLaunch, codexResume, findCodexTicketSessions, identifyCodexSession } from './agents/codex.js';
 import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
-import { listHighlight, sessionRow, sinceLastOpened, ticketRow } from './ui.js';
+import { listHighlight, renderHeader, sessionRow, sinceLastOpened, ticketRow, visibleWidth } from './ui.js';
 import { loadApiToken, saveApiToken } from './token.js';
 import { StatusBar } from './status.js';
 import { QueryPreferencesStore, orderedQueries } from './query-preferences.js';
@@ -17,6 +17,12 @@ import { EventEmitter } from 'node:events';
 import { BACK, promptWithBack } from './back.js';
 import { syncSessionTickets } from './sessions/sync.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
+import { LaunchPreferenceStore } from './launch-preferences.js';
+import { modelOptions, parseConfiguredModels, resolvePreferredModel } from './models.js';
+import { runAgent } from './agents/run.js';
+import { availableEfforts, parseClaudeHelp, parseCodexModelCatalog, resolveEffort } from './agents/capabilities.js';
+import { parsePromptTemplates } from './config.js';
+import { buildLaunchMenu, editablePromptConfig } from './launch-menu.js';
 const settings = { url: 'https://example.test', instanceId: 'main', bugTypeId: 7, userStoryTypeId: 6 };
 const wp = (id: number, type: number, name = 'Bug') => ({ id, subject: `Ticket ${id}`, _links: { type: { href: `/api/v3/types/${type}`, title: name }, status: { href: '/api/v3/statuses/4', title: 'In progress' }, priority: { href: '/api/v3/priorities/3', title: 'High' } } });
 test('OpenProject paginates, filters assigned open tickets, and normalizes stable type IDs', async () => {
@@ -34,6 +40,23 @@ test('OpenProject paginates, filters assigned open tickets, and normalizes stabl
   assert.equal(provider.normalize(wp(7, 99)).typeLabel, 'Bug');
   assert.throws(() => provider.prompt(provider.normalize(wp(7, 99)), 'fix'));
   assert.equal(ticketKey(tickets[0]), 'openproject@main:5');
+});
+test('OpenProject prompt templates use the ticket placeholder and preserve provider defaults', () => {
+  const provider = new OpenProjectProvider({
+    ...settings,
+    promptTemplates: {
+      bug: 'repair OpenProject issue {{id}}',
+      userStory: 'deliver OpenProject story {{id}}'
+    }
+  }, 'secret');
+  const bug = provider.normalize(wp(45, 7));
+  const story = provider.normalize(wp(46, 6, 'User Story'));
+  assert.equal(provider.promptTemplate('bug'), 'repair OpenProject issue {{id}}');
+  assert.equal(provider.promptTemplate('userStory'), 'deliver OpenProject story {{id}}');
+  assert.equal(provider.prompt(bug, 'fix'), 'repair OpenProject issue 45');
+  assert.equal(provider.prompt(story, 'implement'), 'deliver OpenProject story 46');
+  assert.equal(provider.prompt(bug, 'fix', 'inspect {{id}} then fix {{id}}'), 'inspect 45 then fix 45');
+  assert.throws(() => provider.prompt(bug, 'fix', 'missing ticket placeholder'), /must contain \{\{id\}\}/);
 });
 test('sessions persist, retain multiple records, and reject invalid records', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'opai-test-'));
@@ -90,9 +113,111 @@ test('explicit refresh checks saved tickets absent from assigned list', async ()
 test('agent arguments preserve exact prompt and native resume ID', () => {
   const id = '00000000-0000-4000-8000-000000000001';
   assert.deepEqual(claudeLaunch('claude', '/repo', 'fix openproject bug 5', id).args, ['--session-id', id, 'fix openproject bug 5']);
+  assert.deepEqual(claudeLaunch('claude', '/repo', 'fix openproject bug 5', id, 'sonnet', 'high').args, ['--session-id', id, '--model', 'sonnet', '--effort', 'high', 'fix openproject bug 5']);
   assert.deepEqual(claudeResume('claude', '/repo', id).args, ['--resume', id]);
   assert.deepEqual(codexLaunch('codex', '/repo', 'fix openproject bug 5').args, ['fix openproject bug 5']);
+  assert.deepEqual(codexLaunch('codex', '/repo', 'fix openproject bug 5', 'gpt-custom', 'xhigh').args, ['--model', 'gpt-custom', '-c', 'model_reasoning_effort="xhigh"', 'fix openproject bug 5']);
+  assert.deepEqual(codexLaunch('codex', '/repo', 'fix openproject bug 5', null, 'medium').args, ['-c', 'model_reasoning_effort="medium"', 'fix openproject bug 5']);
   assert.deepEqual(codexResume('codex', '/repo', id).args, ['resume', id]);
+});
+test('resume commands never apply current or historical launch options', () => {
+  const id = '00000000-0000-4000-8000-000000000002';
+  assert.deepEqual(claudeResume('claude', '/repo', id).args, ['--resume', id]);
+  assert.deepEqual(codexResume('codex', '/repo', id).args, ['resume', id]);
+});
+test('model options include Claude aliases and only configured Codex models', () => {
+  assert.deepEqual(modelOptions('claude', ['custom-claude', 'sonnet']).map(option => option.value), [null, 'sonnet', 'opus', 'haiku', 'custom-claude']);
+  assert.deepEqual(modelOptions('codex', ['gpt-custom']).map(option => option.value), [null, 'gpt-custom']);
+  assert.equal(resolvePreferredModel('claude', 'sonnet', []), 'sonnet');
+  assert.equal(resolvePreferredModel('codex', null, []), null);
+  assert.throws(() => resolvePreferredModel('codex', 'not-configured', ['gpt-custom']), /not available/);
+  assert.throws(() => modelOptions('codex', ['--invalid']), /Invalid codex model ID/);
+});
+test('Codex bundled catalog exposes visible model versions and their effort choices', () => {
+  const catalog = JSON.stringify({ models: [
+    { slug: 'gpt-visible', display_name: 'GPT Visible', visibility: 'list', default_reasoning_level: 'medium', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }, { effort: 'high' }] },
+    { slug: 'gpt-hidden', display_name: 'GPT Hidden', visibility: 'hide', default_reasoning_level: 'high', supported_reasoning_levels: [{ effort: 'high' }] }
+  ] });
+  const models = parseCodexModelCatalog(catalog, ['custom-codex']);
+  assert.deepEqual(models, [
+    { id: 'gpt-visible', label: 'GPT Visible', defaultEffort: 'medium', efforts: ['low', 'medium', 'high'] },
+    { id: 'custom-codex', label: 'custom-codex', efforts: [] }
+  ]);
+  const capabilities = { models, efforts: [], discovered: true };
+  assert.deepEqual(availableEfforts(capabilities, 'gpt-visible'), ['low', 'medium', 'high']);
+  assert.deepEqual(availableEfforts(capabilities, 'custom-codex'), ['low', 'medium', 'high']);
+  assert.deepEqual(availableEfforts(capabilities, null), ['low', 'medium', 'high']);
+  assert.equal(resolveEffort('high', availableEfforts(capabilities, 'gpt-visible')), 'high');
+  assert.equal(resolveEffort(null, []), null);
+  assert.throws(() => resolveEffort('ultra', availableEfforts(capabilities, 'gpt-visible')), /not available/);
+});
+test('Claude installed help supplies aliases and effort choices with stable fallbacks', () => {
+  const help = [
+    "  --model <model>  Model alias (e.g. 'fable', 'opus', or 'sonnet') or a model's full name",
+    '  --effort <level> Effort level (low, medium, high, xhigh, max)',
+    '  --resume [value] Resume a session'
+  ].join('\n');
+  const capabilities = parseClaudeHelp(help, ['company-model']);
+  assert.deepEqual(capabilities.models.map(model => model.id), ['sonnet', 'opus', 'haiku', 'fable', 'company-model']);
+  assert.deepEqual(capabilities.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(parseClaudeHelp('', []).efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+});
+test('configured model lists reject malformed structures and identifiers', () => {
+  assert.deepEqual(parseConfiguredModels(undefined), undefined);
+  assert.deepEqual(parseConfiguredModels({ claude: ['custom-claude', 'claude-model[1m]'], codex: ['gpt-custom'] }), { claude: ['custom-claude', 'claude-model[1m]'], codex: ['gpt-custom'] });
+  assert.throws(() => parseConfiguredModels({ codex: 'gpt-custom' }), /models.codex must be an array/);
+  assert.throws(() => parseConfiguredModels({ claude: ['--invalid'] }), /Invalid claude model ID/);
+});
+test('configured prompt templates require the ticket placeholder', () => {
+  assert.deepEqual(parsePromptTemplates(undefined), undefined);
+  assert.deepEqual(parsePromptTemplates({ bug: 'fix {{id}}', userStory: 'build {{id}}' }), { bug: 'fix {{id}}', userStory: 'build {{id}}' });
+  assert.throws(() => parsePromptTemplates('fix {{id}}'), /promptTemplates must be an object/);
+  assert.throws(() => parsePromptTemplates({ bug: 'missing placeholder' }), /promptTemplates.bug must contain \{\{id\}\}/);
+});
+test('launch defaults persist per agent and prompt type and can return to Default', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'opai-launch-preferences-test-'));
+  try {
+    const path = join(dir, 'launch.json');
+    const store = new LaunchPreferenceStore(path);
+    assert.deepEqual(await store.all(), {
+      agents: { claude: { model: null, effort: null }, codex: { model: null, effort: null } },
+      prompts: {}
+    });
+    await store.setAgent('claude', { model: 'sonnet', effort: 'high' });
+    await store.setAgent('codex', { model: 'gpt-custom', effort: null });
+    await store.setPrompt('openproject@main', 'bug', 'repair ticket {{id}}');
+    assert.deepEqual(await new LaunchPreferenceStore(path).all(), {
+      agents: { claude: { model: 'sonnet', effort: 'high' }, codex: { model: 'gpt-custom', effort: null } },
+      prompts: { 'openproject@main': { bug: 'repair ticket {{id}}' } }
+    });
+    await store.setAgent('claude', { model: null, effort: null });
+    await store.setPrompt('openproject@main', 'bug', null);
+    assert.deepEqual(await store.all(), {
+      agents: { claude: { model: null, effort: null }, codex: { model: 'gpt-custom', effort: null } },
+      prompts: {}
+    });
+    await assert.rejects(store.setPrompt('openproject@main', 'userStory', 'missing placeholder'), /must contain \{\{id\}\}/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('session launch options are historical metadata and older records load as Default', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'opai-session-model-test-'));
+  try {
+    const path = join(dir, 'sessions.json');
+    const old = { agent: 'claude', sessionId: '00000000-0000-4000-8000-000000000041', cwd: '/repo', createdAt: '2026-09-23T10:00:00Z' };
+    await writeFile(path, JSON.stringify({ 'openproject@main:5': [old] }));
+    const store = new SessionStore(path);
+    assert.deepEqual(await store.list('openproject@main:5'), [{ ...old, model: null, effort: null, initialPrompt: null }]);
+    await store.add('openproject@main:5', { ...old, agent: 'codex', sessionId: '00000000-0000-4000-8000-000000000042', model: 'gpt-custom', effort: 'high', initialPrompt: 'repair ticket 5' } as Parameters<SessionStore['add']>[1]);
+    assert.deepEqual((await store.list('openproject@main:5')).map(session => [session.model, session.effort, session.initialPrompt]), [
+      [null, null, null],
+      ['gpt-custom', 'high', 'repair ticket 5']
+    ]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('agent process failures return their exit code without creating fallback behavior', async () => {
+  const child = new EventEmitter();
+  const spawnProcess = (() => { queueMicrotask(() => child.emit('exit', 2, null)); return child; }) as never;
+  assert.equal(await runAgent({ executable: 'codex', cwd: '/repo', args: ['--model', 'bad-model', 'fix openproject bug 5'] }, undefined, spawnProcess), 2);
 });
 test('Codex capture refuses absent metadata', async () => {
   assert.equal(await identifyCodexSession(new Map(), new Map(), '/repo', 'prompt'), undefined);
@@ -237,6 +362,15 @@ test('ticket rows show ID, title, type, status, and priority without overflowing
   assert.match(row, /High/);
   assert.match(row, /…/);
 });
+test('ticket rows align type, status, and priority columns', () => {
+  const bug = ticketRow({ id: '5', provider: 'openproject@main', title: 'Short', type: 'Bug', typeLabel: 'Bug', status: 'New', priority: { id: '3', name: 'High' } }, 80);
+  const story = ticketRow({ id: '4521', provider: 'openproject@main', title: 'A substantially longer ticket title', type: 'User Story', typeLabel: 'User Story', status: 'In progress', priority: { id: '4', name: 'Normal' } }, 80);
+  assert.match(story, /\bUS\b/);
+  assert.doesNotMatch(story, /User Story/);
+  assert.equal(bug.indexOf('Bug'), story.indexOf('US'));
+  assert.equal(bug.indexOf('New'), story.indexOf('In progress'));
+  assert.equal(bug.indexOf('High'), story.indexOf('Normal'));
+});
 test('selected ticket fills one row without clipping status, and sessions show relative last-opened time', () => {
   const ticket = { id: '4521', provider: 'openproject@main', title: 'Fix charts', type: 'Bug' as const, typeLabel: 'Bug', status: 'Developed' };
   const highlighted = listHighlight(`❯ ${ticketRow(ticket, 60)}`, 60);
@@ -253,7 +387,60 @@ test('selected ticket fills one row without clipping status, and sessions show r
     { agent: 'claude', sessionId: '00000000-0000-4000-8000-000000000001', cwd: '/repo', createdAt: '2026-09-22T09:00:00Z' },
     { agent: 'codex', sessionId: '00000000-0000-4000-8000-000000000002', cwd: '/repo', createdAt: '2026-09-22T10:00:00Z' }
   ] }, 80, now);
-  assert.match(row, /#4521  Fix charts.*\[Developed\]\n      Claude \+ Codex · 2 sessions · last opened 2h ago/);
+  assert.match(row, /#4521\s+Fix charts.*\[Developed\]\s*\n      Claude \+ Codex · 2 sessions · last opened 2h ago/);
+  const other = sessionRow({ key: 'openproject@main:7', id: '7', title: 'A much longer saved ticket title', status: 'New', lastUsedAt: '2026-09-22T10:00:00Z', sessions: [
+    { agent: 'claude', sessionId: '00000000-0000-4000-8000-000000000003', cwd: '/repo', createdAt: '2026-09-22T10:00:00Z' }
+  ] }, 80, now);
+  assert.equal(row.indexOf('[Developed]'), other.indexOf('[New]'));
+});
+test('header keeps the full mascot and aligns all adjacent information', () => {
+  const header = renderHeader('#4521 A ticket title that is much too long for this terminal', 'Bug · In progress · Priority: High', { kind: 'success', message: 'Ready' }, 58, 'idle');
+  const lines = header.split('\n');
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /\/\\_\/\\/);
+  assert.match(lines[1], /\(˶ᵔ ᵕ ᵔ˶\)✧/);
+  assert.match(lines[2], /\/\|☆\|\\/);
+  assert.ok(lines.every(line => visibleWidth(line) <= 58));
+  const contentColumns = [
+    visibleWidth(lines[0].slice(0, lines[0].indexOf('OPAI'))),
+    visibleWidth(lines[1].slice(0, lines[1].indexOf('Bug'))),
+    visibleWidth(lines[2].slice(0, lines[2].indexOf('✓')))
+  ];
+  assert.deepEqual(contentColumns, [contentColumns[0], contentColumns[0], contentColumns[0]]);
+  assert.match(lines[0], /…$/);
+});
+test('header mascot changes by activity without changing content indentation', () => {
+  const claude = renderHeader('Start session', 'Claude Code', { kind: 'idle', message: 'Ready' }, 72, 'claude').split('\n');
+  const codex = renderHeader('Start session', 'Codex', { kind: 'idle', message: 'Ready' }, 72, 'codex').split('\n');
+  assert.notEqual(claude[1].slice(0, claude[1].indexOf('Claude Code')), codex[1].slice(0, codex[1].indexOf('Codex')));
+  assert.equal(visibleWidth(claude[0].slice(0, claude[0].indexOf('OPAI'))), visibleWidth(claude[1].slice(0, claude[1].indexOf('Claude Code'))));
+  assert.equal(visibleWidth(codex[0].slice(0, codex[0].indexOf('OPAI'))), visibleWidth(codex[1].slice(0, codex[1].indexOf('Codex'))));
+});
+test('launch menu shows its selected values and restores focus to the last edited option', () => {
+  const menu = buildLaunchMenu('Sonnet', 'High', 'fix openproject bug {{id}}', 'effort');
+  assert.equal(menu.default, 'effort');
+  assert.deepEqual(menu.choices.map(choice => choice.value), ['start', 'model', 'effort', 'prompt', 'save', 'reset-prompt']);
+  assert.match(menu.choices[0]!.name, /▶  Start session/);
+  assert.match(menu.choices[1]!.name, /◈  Model · Sonnet/);
+  assert.match(menu.choices[2]!.name, /✦  Effort · High/);
+  assert.match(menu.choices[3]!.name, /✎  Prompt · fix openproject bug \{\{id\}\}/);
+  const defaults = buildLaunchMenu('Default', 'Default', 'fix openproject bug {{id}}');
+  assert.match(defaults.choices[1]!.name, /Model · \(Default\)/);
+  assert.match(defaults.choices[2]!.name, /Effort · \(Default\)/);
+});
+test('prompt editing starts with the current template as editable text', () => {
+  const config = editablePromptConfig('Initial prompt template', 'fix openproject bug {{id}}');
+  assert.equal(config.default, 'fix openproject bug {{id}}');
+  assert.equal(config.prefill, 'editable');
+  assert.equal(config.validate('fix openproject bug {{id}}'), true);
+  assert.match(String(config.validate('missing placeholder')), /must contain \{\{id\}\}/);
+});
+test('every activity mascot keeps a cheerful expression', () => {
+  for (const mood of ['idle', 'claude', 'codex', 'resume', 'loading', 'success', 'error'] as const) {
+    const face = renderHeader('Quest', mood, { kind: mood === 'error' ? 'error' : 'idle', message: 'Ready' }, 72, mood).split('\n')[1]!;
+    assert.match(face, /[ᴗᵔᵕω⩊]/, `${mood} mascot should look cheerful`);
+    assert.doesNotMatch(face, /[_︿]/, `${mood} mascot should not look upset`);
+  }
 });
 test('Escape returns from a prompt without treating Ctrl+C as Back', async () => {
   const input = new EventEmitter();

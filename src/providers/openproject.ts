@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import type { Ticket, TicketAction, TicketProvider, SavedQuery } from './types.js';
+import type { Ticket, TicketAction, TicketProvider, SavedQuery, PromptKind } from './types.js';
 type Link = { href?: string | null; title?: string };
 type WorkPackage = { id: number; subject: string; _links: { type?: Link; status?: Link; priority?: Link; self?: Link } };
 type Collection = { total: number; count: number; offset: number; _embedded?: { elements?: WorkPackage[] } };
@@ -24,11 +24,19 @@ export class OpenProjectProvider implements TicketProvider {
       : undefined;
     return { id: String(wp.id), provider: this.identity, title: wp.subject, type, typeLabel, status: wp._links.status?.title ?? 'Unknown', priority, url: `${this.base}/work_packages/${wp.id}` };
   }
-  prompt(ticket: Ticket, action: TicketAction): string {
+  promptTemplate(kind: PromptKind): string {
+    const configured = this.config.promptTemplates?.[kind];
+    const template = configured ?? (kind === 'bug' ? 'fix openproject bug {{id}}' : 'implement openproject user story {{id}}');
+    if (typeof template !== 'string' || !template.includes('{{id}}')) throw new Error(`OpenProject ${kind} prompt template must contain {{id}}.`);
+    return template;
+  }
+  prompt(ticket: Ticket, action: TicketAction, override?: string): string {
     if (ticket.provider !== this.identity) throw new Error('Ticket belongs to another provider.');
-    if (action === 'implement' && ticket.type === 'User Story') return `implement openproject user story ${ticket.id}`;
-    if (action === 'fix' && ticket.type === 'Bug') return `fix openproject bug ${ticket.id}`;
-    throw new Error(`No ${action} action for ${ticket.type} tickets.`);
+    const kind = action === 'fix' && ticket.type === 'Bug' ? 'bug' : action === 'implement' && ticket.type === 'User Story' ? 'userStory' : undefined;
+    if (!kind) throw new Error(`No ${action} action for ${ticket.type} tickets.`);
+    const template = override ?? this.promptTemplate(kind);
+    if (typeof template !== 'string' || !template.includes('{{id}}')) throw new Error(`OpenProject ${kind} prompt template must contain {{id}}.`);
+    return template.replaceAll('{{id}}', ticket.id);
   }
   private async getJson<T>(path: string): Promise<T> {
     let response: Response;

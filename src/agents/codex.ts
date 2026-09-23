@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LaunchSpec } from './types.js';
 import type { NativeSessionCandidate } from './claude.js';
-export function codexLaunch(executable: string, cwd: string, prompt: string): LaunchSpec { return { executable, cwd, args: [prompt] }; }
+export function codexLaunch(executable: string, cwd: string, prompt: string, model: string | null = null, effort: string | null = null): LaunchSpec { return { executable, cwd, args: [...(model ? ['--model', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []), prompt] }; }
 export function codexResume(executable: string, cwd: string, id: string): LaunchSpec { return { executable, cwd, args: ['resume', id] }; }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function filesBelow(dir: string): Promise<string[]> {

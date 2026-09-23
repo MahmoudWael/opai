@@ -50,5 +50,5 @@ export async function findClaudeTicketSessions(prompt: string, root = defaultRoo
   }));
   return candidates.filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined);
 }
-export function claudeLaunch(executable: string, cwd: string, prompt: string, id: string): LaunchSpec { return { executable, cwd, args: ['--session-id', id, prompt] }; }
+export function claudeLaunch(executable: string, cwd: string, prompt: string, id: string, model: string | null = null, effort: string | null = null): LaunchSpec { return { executable, cwd, args: ['--session-id', id, ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), prompt] }; }
 export function claudeResume(executable: string, cwd: string, id: string): LaunchSpec { return { executable, cwd, args: ['--resume', id] }; }

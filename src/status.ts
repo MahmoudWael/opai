@@ -1,7 +1,7 @@
 export type StatusKind = 'idle' | 'cached' | 'loading' | 'success' | 'error';
 export interface Status { kind: StatusKind; message: string }
 
-const faces = ['( •̀ᴗ•́)✧', '( •̀ᴗ•́)⚔', '( •̀ᴗ•́)☆'];
+const faces = ['(˶• ᴗ •˶)⋯', '(˶ᵔ ᴗ ᵔ˶)⌕', '(˶• ⩊ •˶)✧'];
 const spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 
 export class StatusBar {

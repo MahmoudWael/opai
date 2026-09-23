@@ -16,16 +16,49 @@ function truncate(value: string, max: number): string {
   const chars = [...value];
   return chars.length > max ? `${chars.slice(0, Math.max(0, max - 1)).join('')}…` : value;
 }
+export function visibleWidth(value: string): number {
+  let width = 0;
+  for (const char of stripVTControlCharacters(value)) {
+    if (/\p{Mark}/u.test(char)) continue;
+    const code = char.codePointAt(0)!;
+    width += code >= 0x1100 && (
+      code <= 0x115f || code === 0x2329 || code === 0x232a ||
+      (code >= 0x2e80 && code <= 0xa4cf) || (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) || (code >= 0xfe10 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) || (code >= 0x1f300 && code <= 0x1faff)
+    ) ? 2 : 1;
+  }
+  return width;
+}
+function truncateVisible(value: string, max: number): string {
+  if (max <= 0) return '';
+  if (visibleWidth(value) <= max) return value;
+  let result = '';
+  let width = 0;
+  for (const char of value) {
+    const next = visibleWidth(char);
+    if (width + next > max - 1) break;
+    result += char;
+    width += next;
+  }
+  return `${result}…`;
+}
+function padVisible(value: string, width: number): string { return value + ' '.repeat(Math.max(0, width - visibleWidth(value))); }
 export function ticketRow(ticket: Ticket, columns = process.stdout.columns ?? 80): string {
-  const rawBadge = ticket.type === 'Bug' ? 'Bug' : ticket.type === 'User Story' ? 'User Story' : truncate(ticket.typeLabel, 24);
-  const badge = ticket.type === 'Bug' ? paint(31, rawBadge) : ticket.type === 'User Story' ? accent(rawBadge) : warning(rawBadge);
-  const id = `#${ticket.id}`.padEnd(8);
-  const typeWidth = [...rawBadge].length;
-  const status = truncate(ticket.status, 14);
-  const priority = ticket.priority ? truncate(ticket.priority.name, 10) : '';
-  const titleWidth = Math.max(8, Math.min(58, columns - 22 - typeWidth - status.length - (priority ? priority.length + 2 : 0)));
+  const rawBadge = ticket.type === 'Bug' ? 'Bug' : ticket.type === 'User Story' ? 'US' : truncate(ticket.typeLabel, 24);
+  const usableWidth = Math.max(20, columns - 4);
+  const typeWidth = 3;
+  const statusWidth = 11;
+  const priorityWidth = 8;
+  const fixedWidth = 8 + 1 + 2 + typeWidth + 1 + statusWidth + 2 + priorityWidth;
+  const titleWidth = Math.max(6, Math.min(58, usableWidth - fixedWidth));
+  const id = truncate(`#${ticket.id}`, 8).padEnd(8);
   const title = truncate(ticket.title, titleWidth).padEnd(titleWidth);
-  return `${accent(id)} ${title}  ${badge}  ${muted(status)}${priority ? `  ${bold(priority)}` : ''}`;
+  const type = truncate(rawBadge, typeWidth).padEnd(typeWidth);
+  const status = truncate(ticket.status, statusWidth).padEnd(statusWidth);
+  const priority = truncate(ticket.priority?.name ?? '', priorityWidth).padEnd(priorityWidth);
+  const badge = ticket.type === 'Bug' ? paint(31, type) : ticket.type === 'User Story' ? accent(type) : warning(type);
+  return `${accent(id)} ${title}  ${badge} ${muted(status)}  ${ticket.priority ? bold(priority) : priority}`;
 }
 export function listHighlight(value: string, columns = process.stdout.columns ?? 80): string {
   const width = Math.max(1, columns - 2);
@@ -51,21 +84,58 @@ export function sinceLastOpened(value: string, now = Date.now()): string {
 export function sessionRow(group: TicketSessions, columns = process.stdout.columns ?? 80, now = Date.now()): string {
   const agents = [...new Set(group.sessions.map(session => session.agent === 'claude' ? 'Claude' : 'Codex'))].join(' + ');
   const details = `${agents} · ${group.sessions.length} session${group.sessions.length === 1 ? '' : 's'} · last opened ${sinceLastOpened(group.lastUsedAt, now)}`;
-  const status = group.status ? `[${truncate(group.status, 18)}]` : '[Status unavailable]';
-  const titleWidth = Math.max(8, Math.min(58, columns - 10 - group.id.length - [...status].length));
-  return `${accent(`#${group.id}`)}  ${bold(truncate(group.title, titleWidth).padEnd(titleWidth))}  ${group.status ? accent(status) : muted(status)}\n      ${muted(details)}`;
+  const usableWidth = Math.max(20, columns - 4);
+  const statusWidth = 20;
+  const titleWidth = Math.max(8, Math.min(58, usableWidth - 8 - 2 - 2 - statusWidth));
+  const id = truncate(`#${group.id}`, 8).padEnd(8);
+  const title = truncate(group.title, titleWidth).padEnd(titleWidth);
+  const rawStatus = group.status ? `[${truncate(group.status, 18)}]` : '[Status unavailable]';
+  const status = rawStatus.padEnd(statusWidth);
+  const detailIndent = '      ';
+  const visibleDetails = truncateVisible(details, Math.max(1, usableWidth - detailIndent.length));
+  return `${accent(id)}  ${bold(title)}  ${group.status ? accent(status) : muted(status)}\n${detailIndent}${muted(visibleDetails)}`;
 }
-export function screen(title: string, subtitle?: string): void {
+export type MascotMood = 'idle' | 'claude' | 'codex' | 'resume' | 'loading' | 'success' | 'error';
+const mascots: Record<MascotMood, [string, string, string]> = {
+  idle: [' /\\_/\\', '(˶ᵔ ᵕ ᵔ˶)✧', ' /|☆|\\'],
+  claude: [' /\\_/\\', '(˶ᵔ ᴗ ᵔ˶)✦', ' /|⌁|\\'],
+  codex: [' /\\_/\\', '(˶• ⩊ •˶)⚙', ' /|#|\\'],
+  resume: [' /\\_/\\', '(˶ᵔ ᴗ ᵔ˶)↻', ' /|☆|\\'],
+  loading: [' /\\_/\\', '(˶• ᴗ •˶)⋯', ' /|…|\\'],
+  success: [' /\\_/\\', '(˶ᵔ ᴗ ᵔ˶)☆', ' /|☆|\\'],
+  error: [' /\\_/\\', '(˶• ᴗ •˶)♡', ' /|!|\\']
+};
+const mascotWidth = Math.max(...Object.values(mascots).flat().map(visibleWidth));
+
+function headerParts(title: string, subtitle: string | undefined, status: { kind: string; message: string }, columns: number, mood: MascotMood): { art: string[]; content: string[]; stacked: boolean } {
+  const art = mascots[mood];
+  const symbol = status.kind === 'success' ? '✓' : status.kind === 'error' ? '!' : status.kind === 'loading' ? '◌' : status.kind === 'cached' ? '◆' : '◇';
+  const content = [`OPAI › ${title}`, subtitle ?? '', `${symbol} ${status.message}`];
+  const contentStart = 2 + mascotWidth + 3;
+  if (columns < contentStart + 8) {
+    return { art: art.map(line => `  ${line}`), content: content.map(line => `  ${truncateVisible(line, Math.max(1, columns - 2))}`), stacked: true };
+  }
+  const available = Math.max(1, columns - contentStart);
+  return { art: art.map(line => `  ${padVisible(line, mascotWidth)}   `), content: content.map(line => truncateVisible(line, available)), stacked: false };
+}
+
+export function renderHeader(title: string, subtitle: string | undefined, status: { kind: string; message: string }, columns = 80, mood: MascotMood = 'idle'): string {
+  const parts = headerParts(title, subtitle, status, columns, mood);
+  return parts.stacked
+    ? [...parts.art, ...parts.content].join('\n')
+    : parts.art.map((art, index) => `${art}${parts.content[index]}`).join('\n');
+}
+
+export function screen(title: string, subtitle?: string, mood?: MascotMood): void {
   if (process.stdout.isTTY) process.stdout.write('\u001b[2J\u001b[H');
-  const width = Math.max(30, (process.stdout.columns ?? 80) - 14);
   const { kind, message } = statusBar.current;
-  const symbol = kind === 'success' ? '✓' : kind === 'error' ? '!' : kind === 'loading' ? '◌' : kind === 'cached' ? '◆' : '◇';
-  const status = `${symbol} ${message}`;
-  const styledStatus = kind === 'success' ? good(status) : kind === 'error' ? warning(status) : kind === 'loading' ? accent(status) : muted(status);
-  console.log(`\n  ${magic(' /\\_/\\')}   ${bold(accent('OPAI'))}  ${muted('›')}  ${bold(truncate(title, width))}`);
-  console.log(`  ${magic('( •̀ᴗ•́)⚔')}  ${subtitle ? muted(truncate(subtitle, Math.max(30, (process.stdout.columns ?? 80) - 16))) : ''}`);
-  console.log(`  ${magic(' /|☆|\\')}   ${styledStatus}`);
-  console.log();
+  const selectedMood = mood ?? (kind === 'loading' ? 'loading' : kind === 'success' ? 'success' : kind === 'error' ? 'error' : 'idle');
+  const parts = headerParts(title, subtitle, { kind, message }, process.stdout.columns ?? 80, selectedMood);
+  const styleContent = (value: string, index: number) => index === 0 ? bold(accent(value)) : index === 1 ? muted(value) : kind === 'success' ? good(value) : kind === 'error' ? warning(value) : kind === 'loading' ? accent(value) : muted(value);
+  const styled = parts.stacked
+    ? [...parts.art.map(magic), ...parts.content.map(styleContent)].join('\n')
+    : parts.art.map((art, index) => `${magic(art)}${styleContent(parts.content[index]!, index)}`).join('\n');
+  console.log(`\n${styled}\n`);
 }
 export function hint(): string { return muted('↑↓ move · type to filter · Enter select · Esc back · Ctrl+C exit'); }
 

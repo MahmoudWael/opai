@@ -1,8 +1,23 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { parseConfiguredModels, type ConfiguredModels } from './models.js';
 export const configDir = join(homedir(), '.config', 'opai');
-export interface Config { openproject: { url: string; instanceId: string; bugTypeId: number; userStoryTypeId: number }; cacheTtlHours?: number; defaultAgent?: 'claude' | 'codex'; cwd?: string; agents?: { claude?: string; codex?: string } }
+export interface PromptTemplates { bug?: string; userStory?: string }
+export interface Config { openproject: { url: string; instanceId: string; bugTypeId: number; userStoryTypeId: number; promptTemplates?: PromptTemplates }; cacheTtlHours?: number; defaultAgent?: 'claude' | 'codex'; cwd?: string; agents?: { claude?: string; codex?: string }; models?: ConfiguredModels }
+export function parsePromptTemplates(value: unknown): PromptTemplates | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('openproject.promptTemplates must be an object.');
+  const source = value as Record<string, unknown>;
+  const result: PromptTemplates = {};
+  for (const kind of ['bug', 'userStory'] as const) {
+    const template = source[kind];
+    if (template === undefined) continue;
+    if (typeof template !== 'string' || !template.includes('{{id}}')) throw new Error(`openproject.promptTemplates.${kind} must contain {{id}}.`);
+    result[kind] = template;
+  }
+  return result;
+}
 export async function loadConfig(): Promise<Config> {
   let raw: unknown;
   try { raw = JSON.parse(await readFile(join(configDir, 'config.json'), 'utf8')); }
@@ -14,5 +29,5 @@ export async function loadConfig(): Promise<Config> {
   if (!/^[a-zA-Z0-9_-]+$/.test(c.openproject.instanceId)) throw new Error('openproject.instanceId must contain only letters, digits, _ or -.');
   if (c.defaultAgent && !['claude','codex'].includes(c.defaultAgent)) throw new Error('defaultAgent must be claude or codex.');
   if (c.cacheTtlHours !== undefined && (typeof c.cacheTtlHours !== 'number' || !Number.isFinite(c.cacheTtlHours) || c.cacheTtlHours <= 0 || c.cacheTtlHours > 168)) throw new Error('cacheTtlHours must be greater than 0 and at most 168.');
-  return { ...c, cwd: c.cwd ? resolve(c.cwd) : undefined } as Config;
+  return { ...c, openproject: { ...c.openproject, promptTemplates: parsePromptTemplates(c.openproject.promptTemplates) }, models: parseConfiguredModels(c.models), cwd: c.cwd ? resolve(c.cwd) : undefined } as Config;
 }
