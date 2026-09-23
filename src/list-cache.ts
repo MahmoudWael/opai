@@ -7,7 +7,7 @@ import type { SavedQuery, Ticket } from './providers/types.js';
 export interface CacheEntry<T> { version: 1; fetchedAt: number; value: T }
 
 export function isTicketList(value: unknown): value is Ticket[] {
-  return Array.isArray(value) && value.every(item => item && typeof item.id === 'string' && typeof item.provider === 'string' && typeof item.title === 'string' && ['Bug', 'User Story', 'Unsupported'].includes(item.type) && typeof item.typeLabel === 'string' && typeof item.status === 'string');
+  return Array.isArray(value) && value.every(item => item && typeof item.id === 'string' && typeof item.provider === 'string' && typeof item.title === 'string' && ['Bug', 'User Story', 'Unsupported'].includes(item.type) && typeof item.typeLabel === 'string' && typeof item.status === 'string' && (item.priority === undefined || (item.priority && typeof item.priority.id === 'string' && typeof item.priority.name === 'string')));
 }
 
 export function isSavedQueryList(value: unknown): value is SavedQuery[] {

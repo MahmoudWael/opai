@@ -22,9 +22,10 @@ export function ticketRow(ticket: Ticket, columns = process.stdout.columns ?? 80
   const id = `#${ticket.id}`.padEnd(8);
   const typeWidth = [...rawBadge].length;
   const status = truncate(ticket.status, 14);
-  const titleWidth = Math.max(8, Math.min(58, columns - 22 - typeWidth - status.length));
+  const priority = ticket.priority ? truncate(ticket.priority.name, 10) : '';
+  const titleWidth = Math.max(8, Math.min(58, columns - 22 - typeWidth - status.length - (priority ? priority.length + 2 : 0)));
   const title = truncate(ticket.title, titleWidth).padEnd(titleWidth);
-  return `${accent(id)} ${title}  ${badge}  ${muted(status)}`;
+  return `${accent(id)} ${title}  ${badge}  ${muted(status)}${priority ? `  ${bold(priority)}` : ''}`;
 }
 export function listHighlight(value: string, columns = process.stdout.columns ?? 80): string {
   const width = Math.max(1, columns - 2);

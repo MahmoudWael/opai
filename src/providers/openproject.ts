@@ -1,7 +1,7 @@
 import type { Config } from '../config.js';
 import type { Ticket, TicketAction, TicketProvider, SavedQuery } from './types.js';
 type Link = { href?: string | null; title?: string };
-type WorkPackage = { id: number; subject: string; _links: { type?: Link; status?: Link; self?: Link } };
+type WorkPackage = { id: number; subject: string; _links: { type?: Link; status?: Link; priority?: Link; self?: Link } };
 type Collection = { total: number; count: number; offset: number; _embedded?: { elements?: WorkPackage[] } };
 type Query = { id: number; name: string; _embedded?: { results?: Collection } };
 type QueryCollection = { total: number; _embedded?: { elements?: Query[] } };
@@ -18,7 +18,11 @@ export class OpenProjectProvider implements TicketProvider {
     const typeId = linkId(wp._links.type);
     const type = typeId === this.config.bugTypeId ? 'Bug' : typeId === this.config.userStoryTypeId ? 'User Story' : 'Unsupported';
     const typeLabel = wp._links.type?.title ?? 'Unknown';
-    return { id: String(wp.id), provider: this.identity, title: wp.subject, type, typeLabel, status: wp._links.status?.title ?? 'Unknown', url: `${this.base}/work_packages/${wp.id}` };
+    const priorityId = linkId(wp._links.priority);
+    const priority = priorityId !== undefined || wp._links.priority?.title
+      ? { id: priorityId === undefined ? 'unknown' : String(priorityId), name: wp._links.priority?.title ?? 'Unknown' }
+      : undefined;
+    return { id: String(wp.id), provider: this.identity, title: wp.subject, type, typeLabel, status: wp._links.status?.title ?? 'Unknown', priority, url: `${this.base}/work_packages/${wp.id}` };
   }
   prompt(ticket: Ticket, action: TicketAction): string {
     if (ticket.provider !== this.identity) throw new Error('Ticket belongs to another provider.');

@@ -18,7 +18,7 @@ import { BACK, promptWithBack } from './back.js';
 import { syncSessionTickets } from './sessions/sync.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
 const settings = { url: 'https://example.test', instanceId: 'main', bugTypeId: 7, userStoryTypeId: 6 };
-const wp = (id: number, type: number, name = 'Bug') => ({ id, subject: `Ticket ${id}`, _links: { type: { href: `/api/v3/types/${type}`, title: name }, status: { href: '/api/v3/statuses/4', title: 'In progress' } } });
+const wp = (id: number, type: number, name = 'Bug') => ({ id, subject: `Ticket ${id}`, _links: { type: { href: `/api/v3/types/${type}`, title: name }, status: { href: '/api/v3/statuses/4', title: 'In progress' }, priority: { href: '/api/v3/priorities/3', title: 'High' } } });
 test('OpenProject paginates, filters assigned open tickets, and normalizes stable type IDs', async () => {
   const calls: URL[] = [];
   const request = (async (url: string) => { const parsed = new URL(url); calls.push(parsed); const body = parsed.pathname.endsWith('/users/me') ? { id: 42 } : parsed.searchParams.get('offset') === '1' ? { total: 2, count: 1, offset: 1, _embedded: { elements: [wp(5, 7)] } } : { total: 2, count: 1, offset: 2, _embedded: { elements: [wp(6, 6, 'User Story')] } }; return { ok: true, json: async () => body }; }) as unknown as typeof fetch;
@@ -29,6 +29,7 @@ test('OpenProject paginates, filters assigned open tickets, and normalizes stabl
   assert.equal(calls[2].searchParams.get('offset'), '2');
   assert.equal(provider.prompt(tickets[0], 'fix'), 'fix openproject bug 5');
   assert.equal(provider.prompt(tickets[1], 'implement'), 'implement openproject user story 6');
+  assert.deepEqual(tickets[0].priority, { id: '3', name: 'High' });
   assert.equal(provider.normalize(wp(7, 99)).type, 'Unsupported');
   assert.equal(provider.normalize(wp(7, 99)).typeLabel, 'Bug');
   assert.throws(() => provider.prompt(provider.normalize(wp(7, 99)), 'fix'));
@@ -226,13 +227,14 @@ test('saved queries and their results use paginated GET requests without changin
   assert.ok(calls.every(call => call.method === 'GET' && !call.url.searchParams.has('filters')));
   await assert.rejects(provider.listQueryTickets('../5'));
 });
-test('ticket rows show ID, title, type, and status without overflowing long titles', () => {
-  const ticket = { id: '4521', provider: 'openproject@main', title: 'A very long title that should be cut for a narrow terminal', type: 'Bug' as const, typeLabel: 'Bug', status: 'In progress' };
+test('ticket rows show ID, title, type, status, and priority without overflowing long titles', () => {
+  const ticket = { id: '4521', provider: 'openproject@main', title: 'A very long title that should be cut for a narrow terminal', type: 'Bug' as const, typeLabel: 'Bug', status: 'In progress', priority: { id: '3', name: 'High' } };
   const row = ticketRow(ticket, 60);
   assert.match(row, /#4521/);
   assert.match(row, /A very long/);
   assert.match(row, /Bug/);
   assert.match(row, /In progress/);
+  assert.match(row, /High/);
   assert.match(row, /…/);
 });
 test('selected ticket fills one row without clipping status, and sessions show relative last-opened time', () => {
@@ -310,7 +312,7 @@ test('saved sessions group by ticket and keep old records usable without API dat
   const records = {
     'openproject@main:5': [
       { agent: 'claude' as const, sessionId: '00000000-0000-4000-8000-000000000001', cwd: '/repo', createdAt: earlier },
-      { agent: 'codex' as const, sessionId: '00000000-0000-4000-8000-000000000002', cwd: '/repo', createdAt: later, ticket: { id: '5', provider: 'openproject@main', title: 'Fix charts', type: 'Bug' as const, typeLabel: 'Bug', status: 'Open' } }
+      { agent: 'codex' as const, sessionId: '00000000-0000-4000-8000-000000000002', cwd: '/repo', createdAt: later, ticket: { id: '5', provider: 'openproject@main', title: 'Fix charts', type: 'Bug' as const, typeLabel: 'Bug', status: 'Open', priority: { id: '3', name: 'High' } } }
     ],
     'openproject@main:6': [{ agent: 'claude' as const, sessionId: '00000000-0000-4000-8000-000000000003', cwd: '/repo', createdAt: earlier }],
     'openproject@other:7': [{ agent: 'claude' as const, sessionId: '00000000-0000-4000-8000-000000000004', cwd: '/repo', createdAt: later }]
@@ -319,6 +321,7 @@ test('saved sessions group by ticket and keep old records usable without API dat
   assert.deepEqual(groups.map(g => [g.id, g.title, g.sessions.length]), [['5', 'Fix charts', 2], ['6', 'Ticket #6', 1]]);
   assert.equal(groups[0].sessions[0].agent, 'codex');
   assert.equal(groups[0].status, 'Open');
+  assert.doesNotMatch(sessionRow(groups[0]), /High/);
   assert.equal(groups[1].status, undefined);
   assert.match(sessionRow(groups[1]), /Status unavailable/);
 });

@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   }
   async function ticketMenu(ticket: Ticket): Promise<void> {
     while (true) {
-      screen(`#${ticket.id}  ${ticket.title}`, `${ticket.typeLabel} · ${ticket.status}${ticket.url ? ` · ${ticket.url}` : ''}`);
+      screen(`#${ticket.id}  ${ticket.title}`, `${ticket.typeLabel} · ${ticket.status} · Priority: ${ticket.priority?.name ?? 'unavailable'}${ticket.url ? ` · ${ticket.url}` : ''}`);
       const sessions = await store.list(ticketKey(ticket));
       const action = ticket.type === 'Bug' ? 'Fix' : 'Implement';
       const choices = ticket.type === 'Unsupported' ? [] : [
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
       if (!tickets.length) console.log(`  ${muted('No tickets in this list.')}\n`);
       console.log(`  ${hint()}\n`);
       const selected = await promptWithBack(signal => search<Ticket>({ message: 'Search by ID or title', pageSize: 12, theme: listTheme, source: async term => {
-        const filtered = tickets.filter(ticket => `${ticket.id} ${ticket.title} ${ticket.typeLabel}`.toLowerCase().includes((term ?? '').toLowerCase()));
+        const filtered = tickets.filter(ticket => `${ticket.id} ${ticket.title} ${ticket.typeLabel} ${ticket.priority?.name ?? ''}`.toLowerCase().includes((term ?? '').toLowerCase()));
         return filtered.map(ticket => ({ name: ticketRow(ticket), value: ticket, short: `#${ticket.id} ${ticket.title}` }));
       } }, { signal }));
       if (selected === BACK) return;
