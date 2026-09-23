@@ -76,7 +76,7 @@ OPAI is currently developed and tested on Ubuntu under WSL2. It launches agents 
 Install OPAI globally from npm:
 
 ```sh
-npm install --global opai-cli
+npm install --global @mahmoudwael/opai
 ```
 
 Then run:
