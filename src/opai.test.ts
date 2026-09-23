@@ -14,6 +14,7 @@ import { loadApiToken, saveApiToken } from './token.js';
 import { StatusBar } from './status.js';
 import { QueryPreferencesStore, orderedQueries, querySections } from './query-preferences.js';
 import { EventEmitter } from 'node:events';
+import { stripVTControlCharacters } from 'node:util';
 import { BACK, promptWithBack } from './back.js';
 import { syncSessionTickets } from './sessions/sync.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
@@ -25,6 +26,7 @@ import { parsePromptTemplates } from './config.js';
 import { buildLaunchMenu, editablePromptConfig, launchDefaultsSummary, launchDefaultsRow, menuSectionHeader, promptDefaultsSummary } from './launch-menu.js';
 import { MascotRotationStore } from './ui-state.js';
 const settings = { url: 'https://example.test', instanceId: 'main', bugTypeId: 7, userStoryTypeId: 6 };
+const unstyled = (value: string): string => stripVTControlCharacters(value);
 const wp = (id: number, type: number, name = 'Bug') => ({ id, subject: `Ticket ${id}`, _links: { type: { href: `/api/v3/types/${type}`, title: name }, status: { href: '/api/v3/statuses/4', title: 'In progress' }, priority: { href: '/api/v3/priorities/3', title: 'High' } } });
 test('OpenProject paginates, filters assigned open tickets, and normalizes stable type IDs', async () => {
   const calls: URL[] = [];
@@ -367,7 +369,7 @@ test('saved queries and their results use paginated GET requests without changin
 });
 test('ticket rows show ID, title, type, status, and priority without overflowing long titles', () => {
   const ticket = { id: '4521', provider: 'openproject@main', title: 'A very long title that should be cut for a narrow terminal', type: 'Bug' as const, typeLabel: 'Bug', status: 'In progress', priority: { id: '3', name: 'High' } };
-  const row = ticketRow(ticket, 60);
+  const row = unstyled(ticketRow(ticket, 60));
   assert.match(row, /#4521/);
   assert.match(row, /A very long/);
   assert.match(row, /Bug/);
@@ -376,8 +378,8 @@ test('ticket rows show ID, title, type, status, and priority without overflowing
   assert.match(row, /…/);
 });
 test('ticket rows align type, status, and priority columns', () => {
-  const bug = ticketRow({ id: '5', provider: 'openproject@main', title: 'Short', type: 'Bug', typeLabel: 'Bug', status: 'New', priority: { id: '3', name: 'High' } }, 80);
-  const story = ticketRow({ id: '4521', provider: 'openproject@main', title: 'A substantially longer ticket title', type: 'User Story', typeLabel: 'User Story', status: 'In progress', priority: { id: '4', name: 'Normal' } }, 80);
+  const bug = unstyled(ticketRow({ id: '5', provider: 'openproject@main', title: 'Short', type: 'Bug', typeLabel: 'Bug', status: 'New', priority: { id: '3', name: 'High' } }, 80));
+  const story = unstyled(ticketRow({ id: '4521', provider: 'openproject@main', title: 'A substantially longer ticket title', type: 'User Story', typeLabel: 'User Story', status: 'In progress', priority: { id: '4', name: 'Normal' } }, 80));
   assert.match(story, /\bUS\b/);
   assert.doesNotMatch(story, /User Story/);
   assert.equal(bug.indexOf('Bug'), story.indexOf('US'));
@@ -388,23 +390,23 @@ test('selected ticket fills one row without clipping status, and sessions show r
   const ticket = { id: '4521', provider: 'openproject@main', title: 'Fix charts', type: 'Bug' as const, typeLabel: 'Bug', status: 'Developed' };
   const highlighted = listHighlight(`❯ ${ticketRow(ticket, 60)}`, 60);
   assert.equal(highlighted.split('\n').length, 1);
-  assert.match(highlighted, /#4521.*Fix charts.*Bug.*Developed/);
-  assert.equal(highlighted.replace(/\u001b\[[0-9;]*m/g, '').length, 58);
+  assert.match(unstyled(highlighted), /#4521.*Fix charts.*Bug.*Developed/);
+  assert.equal(unstyled(highlighted).length, 58);
   const twoLines = listHighlight('❯ #4521  Fix charts\n      Claude · 1 session · last opened 2h ago', 60).split('\n');
   assert.equal(twoLines.length, 2);
-  assert.equal(twoLines[0].replace(/\u001b\[[0-9;]*m/g, '').length, 58);
-  assert.equal(twoLines[1].replace(/\u001b\[[0-9;]*m/g, '').length, 58);
+  assert.equal(unstyled(twoLines[0]!).length, 58);
+  assert.equal(unstyled(twoLines[1]!).length, 58);
   const now = Date.parse('2026-09-22T12:00:00Z');
   assert.equal(sinceLastOpened('2026-09-22T10:00:00Z', now), '2h ago');
   const row = sessionRow({ key: 'openproject@main:4521', id: '4521', title: 'Fix charts', status: 'Developed', lastUsedAt: '2026-09-22T10:00:00Z', sessions: [
     { agent: 'claude', sessionId: '00000000-0000-4000-8000-000000000001', cwd: '/repo', createdAt: '2026-09-22T09:00:00Z' },
     { agent: 'codex', sessionId: '00000000-0000-4000-8000-000000000002', cwd: '/repo', createdAt: '2026-09-22T10:00:00Z' }
   ] }, 80, now);
-  assert.match(row, /#4521\s+Fix charts.*\[Developed\]\s*\n      Claude \+ Codex · 2 sessions · last opened 2h ago/);
+  assert.match(unstyled(row), /#4521\s+Fix charts.*\[Developed\]\s*\n      Claude \+ Codex · 2 sessions · last opened 2h ago/);
   const other = sessionRow({ key: 'openproject@main:7', id: '7', title: 'A much longer saved ticket title', status: 'New', lastUsedAt: '2026-09-22T10:00:00Z', sessions: [
     { agent: 'claude', sessionId: '00000000-0000-4000-8000-000000000003', cwd: '/repo', createdAt: '2026-09-22T10:00:00Z' }
   ] }, 80, now);
-  assert.equal(row.indexOf('[Developed]'), other.indexOf('[New]'));
+  assert.equal(unstyled(row).indexOf('[Developed]'), unstyled(other).indexOf('[New]'));
 });
 test('header keeps the full mascot and aligns all adjacent information', () => {
   const header = renderHeader('#4521 A ticket title that is much too long for this terminal', 'Bug · In progress · Priority: High', { kind: 'success', message: 'Ready' }, 58, 'idle');
@@ -452,13 +454,13 @@ test('launch menu shows its selected values and restores focus to the last edite
   const menu = buildLaunchMenu('Sonnet', 'High', 'fix openproject bug {{id}}', 'effort');
   assert.equal(menu.default, 'effort');
   assert.deepEqual(menu.choices.map(choice => choice.value), ['start', 'model', 'effort', 'prompt', 'save', 'reset-prompt']);
-  assert.match(menu.choices[0]!.name, /▶  Start session/);
-  assert.match(menu.choices[1]!.name, /◈  Model · Sonnet/);
-  assert.match(menu.choices[2]!.name, /✦  Effort · High/);
-  assert.match(menu.choices[3]!.name, /✎  Prompt · fix openproject bug \{\{id\}\}/);
+  assert.match(unstyled(menu.choices[0]!.name), /▶  Start session/);
+  assert.match(unstyled(menu.choices[1]!.name), /◈  Model · Sonnet/);
+  assert.match(unstyled(menu.choices[2]!.name), /✦  Effort · High/);
+  assert.match(unstyled(menu.choices[3]!.name), /✎  Prompt · fix openproject bug \{\{id\}\}/);
   const defaults = buildLaunchMenu('Default', 'Default', 'fix openproject bug {{id}}');
-  assert.match(defaults.choices[1]!.name, /Model · \(Default\)/);
-  assert.match(defaults.choices[2]!.name, /Effort · \(Default\)/);
+  assert.match(unstyled(defaults.choices[1]!.name), /Model · \(Default\)/);
+  assert.match(unstyled(defaults.choices[2]!.name), /Effort · \(Default\)/);
 });
 test('launch defaults use compact summaries and aligned sections', () => {
   assert.equal(launchDefaultsSummary('Default', 'Default'), 'Agent defaults');
@@ -608,7 +610,7 @@ test('saved sessions group by ticket and keep old records usable without API dat
   assert.deepEqual(groups.map(g => [g.id, g.title, g.sessions.length]), [['5', 'Fix charts', 2], ['6', 'Ticket #6', 1]]);
   assert.equal(groups[0].sessions[0].agent, 'codex');
   assert.equal(groups[0].status, 'Open');
-  assert.doesNotMatch(sessionRow(groups[0]), /High/);
+  assert.doesNotMatch(unstyled(sessionRow(groups[0])), /High/);
   assert.equal(groups[1].status, undefined);
-  assert.match(sessionRow(groups[1]), /Status unavailable/);
+  assert.match(unstyled(sessionRow(groups[1])), /Status unavailable/);
 });
