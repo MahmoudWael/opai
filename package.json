@@ -1,1 +1,57 @@
-{"name":"opai","version":"0.1.0","type":"module","bin":{"opai":"dist/cli.js"},"scripts":{"build":"tsc && chmod +x dist/cli.js","typecheck":"tsc --noEmit","test":"npm run build && node dist/opai.test.js"},"engines":{"node":">=22"},"dependencies":{"@inquirer/prompts":"^7.10.1"},"devDependencies":{"typescript":"^5.9.3","@types/node":"^24.0.0"}}
+{
+  "name": "opai-cli",
+  "version": "0.1.0",
+  "description": "Browse OpenProject tickets, launch Claude Code or Codex, and resume the exact native agent session.",
+  "type": "module",
+  "bin": {
+    "opai": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "config.example.json"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc --project tsconfig.build.json && chmod +x dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run clean && tsc && chmod +x dist/cli.js && node dist/opai.test.js",
+    "verify": "npm run typecheck && npm test",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run verify"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "author": {
+    "name": "Mahmoud Wael",
+    "email": "mahmoud.wael.raslan@gmail.com",
+    "url": "https://github.com/MahmoudWael"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MahmoudWael/opai.git"
+  },
+  "homepage": "https://github.com/MahmoudWael/opai#readme",
+  "bugs": {
+    "url": "https://github.com/MahmoudWael/opai/issues"
+  },
+  "keywords": [
+    "openproject",
+    "claude-code",
+    "codex",
+    "tickets",
+    "cli",
+    "developer-tools"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

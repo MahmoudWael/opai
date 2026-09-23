@@ -71,9 +71,21 @@ Coding agents can work from ticket IDs, but the surrounding workflow is still ea
 
 OPAI is currently developed and tested on Ubuntu under WSL2. It launches agents as normal interactive child processes and does not change their permissions or global configuration.
 
-## Install from source
+## Install
 
-OPAI is not published to npm yet. Install it from this repository:
+Install OPAI globally from npm:
+
+```sh
+npm install --global opai-cli
+```
+
+Then run:
+
+```sh
+opai
+```
+
+To install from source instead:
 
 ```sh
 git clone https://github.com/MahmoudWael/opai.git
@@ -332,7 +344,6 @@ V1 intentionally includes one static provider implementation. It has no plugin l
 - After a failed automatic capture, recovery matches the current effective prompt; a one-session prompt edit must be saved as the ticket-type default before recovery can match it.
 - Codex discovery depends on `codex debug models --bundled`; older CLIs fall back to configured IDs.
 - Claude Code does not expose a supported complete model catalog, so exact version IDs must be configured when aliases are insufficient.
-- Distribution is currently source-only; there is no npm release or platform installer.
 
 ## Troubleshooting
 
@@ -374,3 +385,7 @@ Tests mock OpenProject responses and child-process behavior. They do not require
 ## Support and contributions
 
 Use [GitHub Issues](https://github.com/MahmoudWael/opai/issues) for bug reports, setup problems, and focused feature proposals. When reporting a session-capture problem, include the agent name and version, operating environment, and the OPAI error message. Never include API tokens or private ticket contents.
+
+## License
+
+[MIT](LICENSE) © 2026 Mahmoud Wael
