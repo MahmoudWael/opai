@@ -30,6 +30,31 @@ function selectedValue(value: string): string {
   return value === 'Default' ? '(Default)' : value;
 }
 
+export function launchDefaultsSummary(model: string, effort: string): string {
+  const defaultModel = model === 'Default';
+  const defaultEffort = effort === 'Default';
+  if (defaultModel && defaultEffort) return 'Agent defaults';
+  const modelSummary = defaultModel ? 'Agent model' : model;
+  const effortSummary = defaultEffort ? 'Agent effort' : `${effort} effort`;
+  return `${modelSummary} · ${effortSummary}`;
+}
+
+export function promptDefaultsSummary(custom: boolean): string {
+  return custom ? 'Custom' : 'Provider default';
+}
+
+export function launchDefaultsRow(label: string, summary: string): string {
+  return `  ${label.padEnd(18)}  ${summary}`;
+}
+
+export function menuSectionHeader(label: string, width = 48): string {
+  const content = ` ${label} `;
+  const remaining = Math.max(4, width - [...content].length);
+  const left = Math.floor(remaining / 2);
+  const right = remaining - left;
+  return `${'─'.repeat(left)}${content}${'─'.repeat(right)}`;
+}
+
 export function buildLaunchMenu(
   model: string,
   effort: string,

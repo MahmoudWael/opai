@@ -6,6 +6,8 @@ import type { SavedQuery } from './providers/types.js';
 
 export interface QueryPreference { pinned: boolean; lastOpenedAt?: string }
 export type QueryPreferences = Record<string, QueryPreference>;
+export type QuerySectionKind = 'pinned' | 'recent' | 'all';
+export interface QuerySection { kind: QuerySectionKind; queries: SavedQuery[] }
 
 export function orderedQueries(queries: SavedQuery[], preferences: QueryPreferences, provider: string): SavedQuery[] {
   return [...queries].sort((a, b) => {
@@ -18,6 +20,19 @@ export function orderedQueries(queries: SavedQuery[], preferences: QueryPreferen
     if (!left?.lastOpenedAt && right?.lastOpenedAt) return 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+export function querySections(queries: SavedQuery[], preferences: QueryPreferences, provider: string): QuerySection[] {
+  const sections: Record<QuerySectionKind, SavedQuery[]> = { pinned: [], recent: [], all: [] };
+  for (const query of orderedQueries(queries, preferences, provider)) {
+    const preference = preferences[`${provider}:${query.id}`];
+    if (preference?.pinned) sections.pinned.push(query);
+    else if (preference?.lastOpenedAt) sections.recent.push(query);
+    else sections.all.push(query);
+  }
+  return (['pinned', 'recent', 'all'] as const)
+    .filter(kind => sections[kind].length > 0)
+    .map(kind => ({ kind, queries: sections[kind] }));
 }
 
 export class QueryPreferencesStore {

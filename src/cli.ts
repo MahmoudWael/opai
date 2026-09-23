@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
-import { input, password, select, search } from '@inquirer/prompts';
+import { input, password, select, search, Separator } from '@inquirer/prompts';
 import { loadConfig } from './config.js';
 import { OpenProjectProvider } from './providers/openproject.js';
 import { ticketKey, type PromptKind, type SavedQuery, type Ticket, type TicketProvider } from './providers/types.js';
@@ -9,22 +9,24 @@ import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
 import { loadApiToken, saveApiToken, tokenPath } from './token.js';
 import { SessionStore, sessionTickets, type Session } from './sessions/store.js';
 import { syncSessionTickets } from './sessions/sync.js';
-import { QueryPreferencesStore, orderedQueries } from './query-preferences.js';
+import { QueryPreferencesStore, querySections } from './query-preferences.js';
 import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessionExists } from './agents/claude.js';
 import { codexLaunch, codexResume, codexSessionFiles, findCodexTicketSessions, identifyCodexSession, nativeCodexSessionExists } from './agents/codex.js';
 import { runAgent } from './agents/run.js';
 import type { Agent } from './agents/types.js';
-import { accent, bold, goodbye, good, hint, listHighlight, muted, screen, selectionCursor, sessionRow, ticketRow, warning } from './ui.js';
+import { accent, agentClosedScreen, bold, centeredMenuChoices, goodbye, good, hint, listHighlight, muted, screen, selectionCursor, sessionRow, setIdleMascotMood, ticketRow, warning } from './ui.js';
 import { statusBar } from './status.js';
 import { BACK, promptWithBack } from './back.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
 import { LaunchPreferenceStore, type AgentLaunchDefaults } from './launch-preferences.js';
 import { modelLabel, resolvePreferredModel, type ModelPreference } from './models.js';
 import { availableEfforts, discoverAgentCapabilities, resolveEffort, type AgentCapabilities } from './agents/capabilities.js';
-import { buildLaunchMenu, editablePromptConfig, type LaunchAction } from './launch-menu.js';
+import { buildLaunchMenu, editablePromptConfig, launchDefaultsRow, launchDefaultsSummary, menuSectionHeader, promptDefaultsSummary, type LaunchAction } from './launch-menu.js';
+import { MascotRotationStore } from './ui-state.js';
 function aborted(error: unknown): boolean { return error instanceof Error && error.name === 'ExitPromptError'; }
-const menuTheme = { icon: { cursor: selectionCursor() } };
-const listTheme = { ...menuTheme, style: { highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · Esc back` } };
+class ExitToTerminal extends Error {}
+const menuTheme = { icon: { cursor: selectionCursor() }, style: { highlight: accent } };
+const listTheme = { ...menuTheme, style: { ...menuTheme.style, highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · Esc back` } };
 async function directoryExists(path: string): Promise<boolean> { try { return (await stat(path)).isDirectory(); } catch { return false; } }
 async function nativeExists(session: Session): Promise<boolean> {
   if (session.agent === 'codex') return nativeCodexSessionExists(session.sessionId);
@@ -32,6 +34,7 @@ async function nativeExists(session: Session): Promise<boolean> {
 }
 async function main(): Promise<void> {
   const config = await loadConfig();
+  setIdleMascotMood(await new MascotRotationStore().next());
   let apiToken = await loadApiToken();
   if (!apiToken) {
     if (!process.stdin.isTTY) throw new Error(`No OpenProject API token found. Run opai in a terminal to save one, or set OPENPROJECT_API_TOKEN.`);
@@ -79,6 +82,20 @@ async function main(): Promise<void> {
   const promptKind = (ticket: Ticket): PromptKind => ticket.type === 'Bug' ? 'bug' : 'userStory';
   const ticketAction = (ticket: Ticket) => ticket.type === 'Bug' ? 'fix' as const : 'implement' as const;
   const effortLabel = (effort: string | null) => effort === null ? 'Default' : effort[0]!.toUpperCase() + effort.slice(1);
+  async function afterAgentClosed(detail: string, failed = false): Promise<void> {
+    agentClosedScreen(detail, failed ? 'error' : 'success');
+    const [returnLabel, exitLabel, message] = centeredMenuChoices(['↩  Return to OPAI', '×  Exit to terminal', 'What next?']);
+    const choice = await promptWithBack(signal => select<'return' | 'exit'>({
+      message: message!,
+      default: 'return',
+      theme: menuTheme,
+      choices: [
+        { name: returnLabel!, value: 'return' },
+        { name: exitLabel!, value: 'exit' }
+      ]
+    }, { signal }));
+    if (choice === 'exit') throw new ExitToTerminal();
+  }
   async function capabilities(agent: Agent): Promise<AgentCapabilities> {
     capabilityCache[agent] ??= discoverAgentCapabilities(agent, executables[agent], configuredModels[agent]);
     return capabilityCache[agent]!;
@@ -176,9 +193,12 @@ async function main(): Promise<void> {
     };
     const code = await runAgent(spec, record);
     await record();
-    if (savedId) console.log(`Saved ${agent} session ${savedId} for #${ticket.id}.`);
-    else console.log(`No verified ${agent} session ID was found; no association saved.`);
-    if (code !== 0) console.log(`${agent} exited with code ${code}.`);
+    const exitedUnexpectedly = code !== 0 && code !== 130;
+    const saved = savedId
+      ? `${agentName(agent)} session saved for #${ticket.id}`
+      : `No verified ${agentName(agent)} session ID was found`;
+    const detail = exitedUnexpectedly ? `${saved} · exited with code ${code}` : saved;
+    await afterAgentClosed(detail, exitedUnexpectedly || !savedId);
   }
   async function agentDefaultsMenu(agent: Agent): Promise<void> {
     const caps = await capabilities(agent);
@@ -231,12 +251,18 @@ async function main(): Promise<void> {
   async function launchDefaultsMenu(): Promise<void> {
     while (true) {
       const preferences = await launchPreferences.all();
+      const promptPreferences = preferences.prompts[provider.identity];
       screen('Launch defaults', 'Preselected for new sessions · every launch can override them');
-      const choice = await promptWithBack(signal => select({ message: 'Choose a default', pageSize: 7, theme: menuTheme, choices: [
-        { name: `Claude Code · ${modelLabel(preferences.agents.claude.model)} · ${effortLabel(preferences.agents.claude.effort)}`, value: 'claude' },
-        { name: `Codex · ${modelLabel(preferences.agents.codex.model)} · ${effortLabel(preferences.agents.codex.effort)}`, value: 'codex' },
-        { name: 'Bug prompt template', value: 'bug' },
-        { name: 'User Story prompt template', value: 'userStory' }
+      const choice = await promptWithBack(signal => select<'claude' | 'codex' | PromptKind>({ message: 'Choose a default', pageSize: 9, theme: menuTheme, choices: [
+        new Separator(accent(bold(menuSectionHeader('Agent defaults')))),
+        new Separator(''),
+        { name: launchDefaultsRow('Claude Code', launchDefaultsSummary(modelLabel(preferences.agents.claude.model), effortLabel(preferences.agents.claude.effort))), value: 'claude' },
+        { name: launchDefaultsRow('Codex', launchDefaultsSummary(modelLabel(preferences.agents.codex.model), effortLabel(preferences.agents.codex.effort))), value: 'codex' },
+        new Separator(''),
+        new Separator(accent(bold(menuSectionHeader('Prompt defaults')))),
+        new Separator(''),
+        { name: launchDefaultsRow('Bug prompt', promptDefaultsSummary(promptPreferences?.bug !== undefined)), value: 'bug' },
+        { name: launchDefaultsRow('User Story prompt', promptDefaultsSummary(promptPreferences?.userStory !== undefined)), value: 'userStory' }
       ] }, { signal }));
       if (choice === BACK) return;
       if (choice === 'claude' || choice === 'codex') await agentDefaultsMenu(choice);
@@ -262,20 +288,26 @@ async function main(): Promise<void> {
     await store.add(ticketKey(ticket), { ...candidate, lastUsedAt: candidate.createdAt, ticket });
     console.log(`Recorded ${candidate.agent} session ${candidate.sessionId} for #${ticket.id}.`);
   }
-  async function resumeForKey(key: string, title: string, confirmSingle = false): Promise<void> {
+  async function resumeForKey(key: string, title: string, confirmSingle = false): Promise<boolean> {
     const sessions = await store.list(key);
-    if (!sessions.length) { console.log('No session recorded for this ticket.'); return; }
+    if (!sessions.length) { console.log('No session recorded for this ticket.'); return false; }
     if (sessions.length > 1 || confirmSingle) screen(title, 'Choose a saved conversation', 'resume');
     const index = sessions.length === 1 && !confirmSingle ? 0 : await promptWithBack(signal => select({ message: 'Resume session', pageSize: 12, theme: menuTheme, choices: sessions.map((s, index) => ({ name: `${s.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(s.lastUsedAt ?? s.createdAt).toLocaleString()} · ${s.cwd}`, value: index })) }, { signal }));
     const session = index === BACK ? undefined : sessions[index];
-    if (!session) return;
-    if (!await directoryExists(session.cwd)) { console.log(`Working directory no longer exists: ${session.cwd}`); return; }
-    if (!await nativeExists(session)) { console.log(`Native ${session.agent} session ${session.sessionId} is missing or inaccessible.`); return; }
+    if (!session) return false;
+    if (!await directoryExists(session.cwd)) { console.log(`Working directory no longer exists: ${session.cwd}`); return false; }
+    if (!await nativeExists(session)) { console.log(`Native ${session.agent} session ${session.sessionId} is missing or inaccessible.`); return false; }
     screen(`Resume ${session.agent === 'claude' ? 'Claude Code' : 'Codex'}`, title, 'resume');
     const spec = session.agent === 'claude' ? claudeResume(executables.claude, session.cwd, session.sessionId) : codexResume(executables.codex, session.cwd, session.sessionId);
     const code = await runAgent(spec);
-    if (code === 0 || code === 130) await store.touch(key, session.sessionId);
-    else console.log(`Resume exited with code ${code}; no new session was created by OPAI.`);
+    const exitedUnexpectedly = code !== 0 && code !== 130;
+    if (!exitedUnexpectedly) await store.touch(key, session.sessionId);
+    const label = agentName(session.agent);
+    const detail = exitedUnexpectedly
+      ? `${label} exited with code ${code} · saved session kept`
+      : `${label} session is ready to resume later`;
+    await afterAgentClosed(detail, exitedUnexpectedly);
+    return true;
   }
   async function ticketMenu(ticket: Ticket): Promise<void> {
     while (true) {
@@ -299,17 +331,23 @@ async function main(): Promise<void> {
           if (options) await launch(ticket, agent, options);
         }
       }
-      catch (error) { console.error(error instanceof Error ? error.message : String(error)); }
+      catch (error) {
+        if (error instanceof ExitToTerminal) throw error;
+        console.error(error instanceof Error ? error.message : String(error));
+      }
     }
   }
   const args = process.argv.slice(2);
   if (args.length && args[0] !== 'mine' && args[0] !== 'show' && args[0] !== 'resume') throw new Error('Usage: opai [mine | show <id> | resume <id>]');
   if (args[0] === 'show' || args[0] === 'resume') {
     if (!args[1]) throw new Error('Ticket ID required.');
-    if (args[0] === 'resume') { await resumeForKey(`${provider.identity}:${args[1]}`, `Ticket #${args[1]}`, true); return; }
-    const ticket = await statusBar.run(`Loading ticket #${args[1]}`, () => provider.get(args[1]), item => `Ticket #${item.id} loaded`);
-    await ticketMenu(ticket);
-    return;
+    if (args[0] === 'resume') {
+      if (!await resumeForKey(`${provider.identity}:${args[1]}`, `Ticket #${args[1]}`, true)) return;
+    } else {
+      const ticket = await statusBar.run(`Loading ticket #${args[1]}`, () => provider.get(args[1]), item => `Ticket #${item.id} loaded`);
+      await ticketMenu(ticket);
+      return;
+    }
   }
   async function browseTickets(key: string, label: string, load: () => Promise<Ticket[]>): Promise<void> {
     const tickets = await cachedTickets(key, load, label);
@@ -344,7 +382,10 @@ async function main(): Promise<void> {
         } else if (choice === 'refresh') {
           await cachedTickets(key, load, query.name, true);
         } else await browseTickets(key, query.name, load);
-      } catch (error) { console.error(error instanceof Error ? error.message : String(error)); }
+      } catch (error) {
+        if (error instanceof ExitToTerminal) throw error;
+        console.error(error instanceof Error ? error.message : String(error));
+      }
     }
   }
   async function savedQueries(): Promise<void> {
@@ -353,13 +394,19 @@ async function main(): Promise<void> {
       screen('Saved queries', `${queries.length} quer${queries.length === 1 ? 'y' : 'ies'} · auto refresh after ${config.cacheTtlHours ?? 8}h`);
       console.log(`  ${muted('Type to search · ↑↓ move · Enter select · Esc back')}\n`);
       const preferences = await queryPreferences.all();
-      const sorted = orderedQueries(queries, preferences, provider.identity);
-      const choice = await promptWithBack(signal => search<SavedQuery>({ message: 'Search saved queries', pageSize: 12, theme: listTheme, source: async term => {
-        const filtered = sorted.filter(query => `${query.id} ${query.name}`.toLowerCase().includes((term ?? '').toLowerCase()));
-        return filtered.map(query => {
-          const preference = preferences[`${provider.identity}:${query.id}`];
-          const marker = preference?.pinned ? '★' : preference?.lastOpenedAt ? '◷' : '▤';
-          return { name: `${marker}  ${query.name}`, value: query, short: query.name };
+      const choice = await promptWithBack(signal => search<SavedQuery>({ message: 'Search saved queries', pageSize: 15, theme: listTheme, source: async term => {
+        const filtered = queries.filter(query => `${query.id} ${query.name}`.toLowerCase().includes((term ?? '').toLowerCase()));
+        return querySections(filtered, preferences, provider.identity).flatMap(section => {
+          const heading = section.kind === 'pinned'
+            ? warning(bold('── ★ Pinned ─────────────────────'))
+            : section.kind === 'recent'
+              ? accent(bold('── ◷ Recently viewed ────────────'))
+              : bold('── All queries ─────────────────');
+          const marker = section.kind === 'pinned' ? '★' : section.kind === 'recent' ? '◷' : '▤';
+          return [
+            new Separator(heading),
+            ...section.queries.map(query => ({ name: `${marker}  ${query.name}`, value: query, short: query.name }))
+          ];
         });
       } }, { signal }));
       if (choice === BACK) return;
@@ -410,10 +457,13 @@ async function main(): Promise<void> {
       } else {
         await cachedList(queryCache, 'saved', () => provider.listSavedQueries(), 'saved queries', 'queries', true);
       }
-    } catch (error) { console.error(error instanceof Error ? error.message : String(error)); }
+    } catch (error) {
+      if (error instanceof ExitToTerminal) throw error;
+      console.error(error instanceof Error ? error.message : String(error));
+    }
   }
 }
 main().then(goodbye).catch(error => {
-  if (aborted(error)) goodbye();
+  if (aborted(error) || error instanceof ExitToTerminal) goodbye();
   else { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
 });

@@ -9,10 +9,10 @@ import { SessionStore, sessionTickets } from './sessions/store.js';
 import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessionExists } from './agents/claude.js';
 import { codexLaunch, codexResume, findCodexTicketSessions, identifyCodexSession } from './agents/codex.js';
 import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
-import { listHighlight, renderHeader, selectionCursor, sessionRow, sinceLastOpened, ticketRow, visibleWidth } from './ui.js';
+import { centeredMenuChoices, createOpaiPalette, listHighlight, renderAgentClosed, renderGoodbye, renderHeader, selectionCursor, sessionRow, setIdleMascotMood, sinceLastOpened, ticketRow, visibleWidth } from './ui.js';
 import { loadApiToken, saveApiToken } from './token.js';
 import { StatusBar } from './status.js';
-import { QueryPreferencesStore, orderedQueries } from './query-preferences.js';
+import { QueryPreferencesStore, orderedQueries, querySections } from './query-preferences.js';
 import { EventEmitter } from 'node:events';
 import { BACK, promptWithBack } from './back.js';
 import { syncSessionTickets } from './sessions/sync.js';
@@ -22,7 +22,8 @@ import { modelOptions, parseConfiguredModels, resolvePreferredModel } from './mo
 import { runAgent } from './agents/run.js';
 import { availableEfforts, parseClaudeHelp, parseCodexModelCatalog, resolveEffort } from './agents/capabilities.js';
 import { parsePromptTemplates } from './config.js';
-import { buildLaunchMenu, editablePromptConfig } from './launch-menu.js';
+import { buildLaunchMenu, editablePromptConfig, launchDefaultsSummary, launchDefaultsRow, menuSectionHeader, promptDefaultsSummary } from './launch-menu.js';
+import { MascotRotationStore } from './ui-state.js';
 const settings = { url: 'https://example.test', instanceId: 'main', bugTypeId: 7, userStoryTypeId: 6 };
 const wp = (id: number, type: number, name = 'Bug') => ({ id, subject: `Ticket ${id}`, _links: { type: { href: `/api/v3/types/${type}`, title: name }, status: { href: '/api/v3/statuses/4', title: 'In progress' }, priority: { href: '/api/v3/priorities/3', title: 'High' } } });
 test('OpenProject paginates, filters assigned open tickets, and normalizes stable type IDs', async () => {
@@ -421,12 +422,31 @@ test('header keeps the full mascot and aligns all adjacent information', () => {
   assert.deepEqual(contentColumns, [contentColumns[0], contentColumns[0], contentColumns[0]]);
   assert.match(lines[0], /…$/);
 });
+test('rabbit launches use the rabbit goodbye art', () => {
+  assert.match(renderGoodbye('rabbit'), /₍ᐢ\.\.ᐢ₎♡/);
+  assert.doesNotMatch(renderGoodbye('idle'), /₍ᐢ\.\.ᐢ₎♡/);
+});
 test('header mascot changes by activity without changing content indentation', () => {
   const claude = renderHeader('Start session', 'Claude Code', { kind: 'idle', message: 'Ready' }, 72, 'claude').split('\n');
   const codex = renderHeader('Start session', 'Codex', { kind: 'idle', message: 'Ready' }, 72, 'codex').split('\n');
   assert.notEqual(claude[1].slice(0, claude[1].indexOf('Claude Code')), codex[1].slice(0, codex[1].indexOf('Codex')));
   assert.equal(visibleWidth(claude[0].slice(0, claude[0].indexOf('OPAI'))), visibleWidth(claude[1].slice(0, claude[1].indexOf('Claude Code'))));
   assert.equal(visibleWidth(codex[0].slice(0, codex[0].indexOf('OPAI'))), visibleWidth(codex[1].slice(0, codex[1].indexOf('Codex'))));
+});
+test('post-agent screen places a cheerful mascot above centered choices', () => {
+  const columns = 60;
+  const screen = renderAgentClosed('Claude Code session saved for #4521', 'success', columns).split('\n');
+  assert.match(screen.join('\n'), /Session closed/);
+  assert.match(screen.join('\n'), /session saved for #4521/);
+  assert.ok(screen.indexOf(screen.find(line => line.includes('☆'))!) < screen.indexOf(screen.find(line => line.includes('Session closed'))!));
+  for (const line of screen.filter(Boolean)) {
+    const plain = line.replace(/^ +/, '');
+    const left = visibleWidth(line) - visibleWidth(plain);
+    assert.ok(Math.abs(left - Math.floor((columns - visibleWidth(plain)) / 2)) <= 1);
+  }
+  const choices = centeredMenuChoices(['↩  Return to OPAI', '×  Exit to terminal'], columns);
+  assert.equal(choices[0]!.indexOf('↩'), choices[1]!.indexOf('×'));
+  assert.ok(choices[0]!.indexOf('↩') > 15);
 });
 test('launch menu shows its selected values and restores focus to the last edited option', () => {
   const menu = buildLaunchMenu('Sonnet', 'High', 'fix openproject bug {{id}}', 'effort');
@@ -440,6 +460,23 @@ test('launch menu shows its selected values and restores focus to the last edite
   assert.match(defaults.choices[1]!.name, /Model · \(Default\)/);
   assert.match(defaults.choices[2]!.name, /Effort · \(Default\)/);
 });
+test('launch defaults use compact summaries and aligned sections', () => {
+  assert.equal(launchDefaultsSummary('Default', 'Default'), 'Agent defaults');
+  assert.equal(launchDefaultsSummary('Sonnet', 'High'), 'Sonnet · High effort');
+  assert.equal(launchDefaultsSummary('Default', 'High'), 'Agent model · High effort');
+  assert.equal(launchDefaultsSummary('gpt-5.3-codex', 'Default'), 'gpt-5.3-codex · Agent effort');
+  assert.equal(promptDefaultsSummary(false), 'Provider default');
+  assert.equal(promptDefaultsSummary(true), 'Custom');
+  const rows = [
+    launchDefaultsRow('Claude Code', 'Agent defaults'),
+    launchDefaultsRow('Codex', 'gpt-5.3-codex · High effort'),
+    launchDefaultsRow('Bug prompt', 'Provider default')
+  ];
+  assert.deepEqual(rows.map(row => row.indexOf('Agent') >= 0 ? row.indexOf('Agent') : row.indexOf('gpt-5.3-codex') >= 0 ? row.indexOf('gpt-5.3-codex') : row.indexOf('Provider')), [22, 22, 22]);
+  const header = menuSectionHeader('Agent defaults', 48);
+  assert.equal(visibleWidth(header), 48);
+  assert.ok(Math.abs(header.indexOf('Agent defaults') - (48 - 'Agent defaults'.length) / 2) <= 1);
+});
 test('prompt editing starts with the current template as editable text', () => {
   const config = editablePromptConfig('Initial prompt template', 'fix openproject bug {{id}}');
   assert.equal(config.default, 'fix openproject bug {{id}}');
@@ -448,15 +485,42 @@ test('prompt editing starts with the current template as editable text', () => {
   assert.match(String(config.validate('missing placeholder')), /must contain \{\{id\}\}/);
 });
 test('every activity mascot keeps a cheerful expression', () => {
-  for (const mood of ['idle', 'claude', 'codex', 'resume', 'loading', 'success', 'error'] as const) {
+  for (const mood of ['idle', 'rabbit', 'chick', 'claude', 'codex', 'resume', 'loading', 'success', 'error'] as const) {
     const face = renderHeader('Quest', mood, { kind: mood === 'error' ? 'error' : 'idle', message: 'Ready' }, 72, mood).split('\n')[1]!;
-    assert.match(face, /[ᴗᵔᵕω⩊]/, `${mood} mascot should look cheerful`);
+    assert.match(face, /[ᴗᵔᵕω⩊ᴥө]/, `${mood} mascot should look cheerful`);
     assert.doesNotMatch(face, /[_︿]/, `${mood} mascot should not look upset`);
+  }
+});
+test('home mascot rotates across process launches and becomes the neutral screen default', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'opai-mascot-rotation-test-'));
+  try {
+    const path = join(dir, 'ui-state.json');
+    const first = await new MascotRotationStore(path).next();
+    const second = await new MascotRotationStore(path).next();
+    const third = await new MascotRotationStore(path).next();
+    const fourth = await new MascotRotationStore(path).next();
+    assert.deepEqual([first, second, third, fourth], ['rabbit', 'chick', 'idle', 'rabbit']);
+    assert.equal(new Set([first, second, third]).size, 3);
+    setIdleMascotMood(second);
+    assert.match(renderHeader('Home', 'Browse tickets', { kind: 'idle', message: 'Ready' }, 80), /ө/);
+  } finally {
+    setIdleMascotMood('idle');
+    await rm(dir, { recursive: true, force: true });
   }
 });
 test('selection cursor uses terminal blink when animation is available', () => {
   assert.equal(selectionCursor('❯', true), '\u001b[5m❯\u001b[25m');
   assert.equal(selectionCursor('❯', false), '❯');
+});
+test('OPAI uses its Catppuccin Mocha RGB palette independently of ANSI theme colors', () => {
+  const palette = createOpaiPalette(true);
+  assert.equal(palette.accent('x'), '\u001b[38;2;148;226;213mx\u001b[0m');
+  assert.equal(palette.mascot('x'), '\u001b[38;2;245;194;231mx\u001b[0m');
+  assert.equal(palette.positive('x'), '\u001b[38;2;166;227;161mx\u001b[0m');
+  assert.equal(palette.warning('x'), '\u001b[38;2;249;226;175mx\u001b[0m');
+  assert.equal(palette.danger('x'), '\u001b[38;2;243;139;168mx\u001b[0m');
+  assert.equal(palette.muted('x'), '\u001b[38;2;88;91;112mx\u001b[0m');
+  assert.equal(createOpaiPalette(false).accent('x'), 'x');
 });
 test('Escape returns from a prompt without treating Ctrl+C as Back', async () => {
   const input = new EventEmitter();
@@ -508,6 +572,26 @@ test('query pins and recents persist and sort ahead of other queries', async () 
     assert.equal(await store.togglePin('openproject@main', '2'), false);
     assert.deepEqual(orderedQueries(queries, await store.all(), 'other-instance').map(q => q.id), ['1', '2', '3']);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('saved queries are grouped into pinned, recently viewed, and all-query sections', () => {
+  const queries = [
+    { id: '1', name: 'Alpha' },
+    { id: '2', name: 'Beta' },
+    { id: '3', name: 'Gamma' },
+    { id: '4', name: 'Delta' }
+  ];
+  const preferences = {
+    'openproject@main:2': { pinned: false, lastOpenedAt: '2026-09-22T09:00:00Z' },
+    'openproject@main:3': { pinned: true, lastOpenedAt: '2026-09-22T08:00:00Z' },
+    'openproject@main:4': { pinned: false, lastOpenedAt: '2026-09-22T10:00:00Z' }
+  };
+  const sections = querySections(queries, preferences, 'openproject@main');
+  assert.deepEqual(sections.map(section => [section.kind, section.queries.map(query => query.id)]), [
+    ['pinned', ['3']],
+    ['recent', ['4', '2']],
+    ['all', ['1']]
+  ]);
+  assert.deepEqual(querySections(queries.slice(0, 1), preferences, 'openproject@main').map(section => section.kind), ['all']);
 });
 test('saved sessions group by ticket and keep old records usable without API data', async () => {
   const earlier = '2026-09-21T10:00:00Z';
