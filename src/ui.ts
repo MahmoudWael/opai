@@ -10,7 +10,11 @@ export const muted = (value: string): string => paint(90, value);
 export const bold = (value: string): string => paint(1, value);
 export const warning = (value: string): string => paint(33, value);
 export const good = (value: string): string => paint(32, value);
+export const danger = (value: string): string => paint(31, value);
 const magic = (value: string): string => paint(35, value);
+export function selectionCursor(value = '❯', animated = color): string {
+  return animated ? `\u001b[5m${value}\u001b[25m` : value;
+}
 
 function truncate(value: string, max: number): string {
   const chars = [...value];
@@ -64,7 +68,8 @@ export function listHighlight(value: string, columns = process.stdout.columns ??
   const width = Math.max(1, columns - 2);
   return stripVTControlCharacters(value).split('\n').map(line => {
     const row = line.padEnd(width);
-    return color ? `\u001b[7m${row}\u001b[0m` : row;
+    const animatedRow = row.startsWith('❯') ? `${selectionCursor('❯')}${row.slice(1)}` : row;
+    return color ? `\u001b[7m${animatedRow}\u001b[0m` : row;
   }).join('\n');
 }
 export function sinceLastOpened(value: string, now = Date.now()): string {

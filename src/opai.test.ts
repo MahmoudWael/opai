@@ -9,7 +9,7 @@ import { SessionStore, sessionTickets } from './sessions/store.js';
 import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessionExists } from './agents/claude.js';
 import { codexLaunch, codexResume, findCodexTicketSessions, identifyCodexSession } from './agents/codex.js';
 import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
-import { listHighlight, renderHeader, sessionRow, sinceLastOpened, ticketRow, visibleWidth } from './ui.js';
+import { listHighlight, renderHeader, selectionCursor, sessionRow, sinceLastOpened, ticketRow, visibleWidth } from './ui.js';
 import { loadApiToken, saveApiToken } from './token.js';
 import { StatusBar } from './status.js';
 import { QueryPreferencesStore, orderedQueries } from './query-preferences.js';
@@ -320,6 +320,18 @@ test('dashboard uses stale cache without fetching and renders all local quest st
     assert.equal(model.touchedThisWeek, 2);
     const output = renderDashboard(model, 80);
     for (const text of ['QUEST STATUS', 'AGENT PARTY', 'WEEKLY QUESTS', '7-DAY ACTIVITY', 'OPEN QUEST TREND', 'LAST QUEST', 'In progress', 'Claude', 'Codex', 'Fix charts']) assert.match(output, new RegExp(text));
+    const mark = (name: string) => (value: string) => `<${name}>${value}</${name}>`;
+    const styled = renderDashboard(model, 80, now, {
+      heading: mark('heading'), positive: mark('positive'), warning: mark('warning'),
+      danger: mark('danger'), accent: mark('accent'), bold: mark('bold')
+    });
+    for (const heading of ['QUEST STATUS', 'AGENT PARTY', 'WEEKLY QUESTS', '7-DAY ACTIVITY', 'OPEN QUEST TREND', 'LAST QUEST']) {
+      assert.match(styled, new RegExp(`<heading>[^<]*${heading}[^<]*</heading>`));
+    }
+    assert.match(styled, /Bugs <danger>1<\/danger>/);
+    assert.match(styled, /Sessions <positive>2<\/positive>/);
+    assert.match(styled, /<accent>[█░▁-▇ ]+<\/accent>/);
+    assert.match(styled, /↻ just now/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('empty lists persist and failed refresh preserves the previous cached list', async () => {
@@ -441,6 +453,10 @@ test('every activity mascot keeps a cheerful expression', () => {
     assert.match(face, /[ᴗᵔᵕω⩊]/, `${mood} mascot should look cheerful`);
     assert.doesNotMatch(face, /[_︿]/, `${mood} mascot should not look upset`);
   }
+});
+test('selection cursor uses terminal blink when animation is available', () => {
+  assert.equal(selectionCursor('❯', true), '\u001b[5m❯\u001b[25m');
+  assert.equal(selectionCursor('❯', false), '❯');
 });
 test('Escape returns from a prompt without treating Ctrl+C as Back', async () => {
   const input = new EventEmitter();

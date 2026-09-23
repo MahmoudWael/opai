@@ -14,7 +14,7 @@ import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessi
 import { codexLaunch, codexResume, codexSessionFiles, findCodexTicketSessions, identifyCodexSession, nativeCodexSessionExists } from './agents/codex.js';
 import { runAgent } from './agents/run.js';
 import type { Agent } from './agents/types.js';
-import { accent, bold, goodbye, good, hint, listHighlight, muted, screen, sessionRow, ticketRow, warning } from './ui.js';
+import { accent, bold, goodbye, good, hint, listHighlight, muted, screen, selectionCursor, sessionRow, ticketRow, warning } from './ui.js';
 import { statusBar } from './status.js';
 import { BACK, promptWithBack } from './back.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
@@ -23,7 +23,8 @@ import { modelLabel, resolvePreferredModel, type ModelPreference } from './model
 import { availableEfforts, discoverAgentCapabilities, resolveEffort, type AgentCapabilities } from './agents/capabilities.js';
 import { buildLaunchMenu, editablePromptConfig, type LaunchAction } from './launch-menu.js';
 function aborted(error: unknown): boolean { return error instanceof Error && error.name === 'ExitPromptError'; }
-const listTheme = { style: { highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · Esc back` } };
+const menuTheme = { icon: { cursor: selectionCursor() } };
+const listTheme = { ...menuTheme, style: { highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · Esc back` } };
 async function directoryExists(path: string): Promise<boolean> { try { return (await stat(path)).isDirectory(); } catch { return false; } }
 async function nativeExists(session: Session): Promise<boolean> {
   if (session.agent === 'codex') return nativeCodexSessionExists(session.sessionId);
@@ -88,7 +89,7 @@ async function main(): Promise<void> {
     return found && found.label !== found.id ? `${found.label} · ${found.id}` : found?.label ?? model;
   }
   async function selectModel(agent: Agent, current: ModelPreference, caps: AgentCapabilities): Promise<ModelPreference | typeof BACK> {
-    return promptWithBack(signal => select<ModelPreference>({ message: `${agentName(agent)} model`, pageSize: 12, default: current, choices: [
+    return promptWithBack(signal => select<ModelPreference>({ message: `${agentName(agent)} model`, pageSize: 12, theme: menuTheme, default: current, choices: [
       { name: `${muted('◇  Default')}${current === null ? good(' · current') : ''}`, value: null },
       ...caps.models.map(model => ({ name: `${accent('◈')}  ${bold(modelDisplay(model.id, caps))}${model.id === current ? good(' · current') : ''}`, value: model.id }))
     ] }, { signal }));
@@ -96,7 +97,7 @@ async function main(): Promise<void> {
   async function selectEffort(agent: Agent, current: string | null, model: ModelPreference, caps: AgentCapabilities): Promise<string | null | typeof BACK> {
     const efforts = availableEfforts(caps, model);
     const agentDefault = model === null ? undefined : caps.models.find(item => item.id === model)?.defaultEffort;
-    return promptWithBack(signal => select<string | null>({ message: `${agentName(agent)} effort`, pageSize: 10, default: current, choices: [
+    return promptWithBack(signal => select<string | null>({ message: `${agentName(agent)} effort`, pageSize: 10, theme: menuTheme, default: current, choices: [
       { name: `${muted('◇  Default')}${agentDefault ? muted(` · agent uses ${effortLabel(agentDefault)}`) : ''}${current === null ? good(' · current') : ''}`, value: null },
       ...efforts.map(effort => ({ name: `${warning('✦')}  ${bold(effortLabel(effort))}${effort === current ? good(' · current') : ''}`, value: effort }))
     ] }, { signal }));
@@ -121,7 +122,7 @@ async function main(): Promise<void> {
       console.log(`  ${muted(`Tip: {{id}} becomes ${ticket.id}`)}`);
       console.log(`  ${muted(`Will send: ${preview}`)}\n`);
       const menu = buildLaunchMenu(modelDisplay(model, caps), effortLabel(effort), template, focusedAction, { model: modelAvailable, effort: effortAvailable });
-      const choice = await promptWithBack(signal => select<LaunchAction>({ message: 'Launch options', pageSize: 8, ...menu }, { signal }));
+      const choice = await promptWithBack(signal => select<LaunchAction>({ message: 'Launch options', pageSize: 8, theme: menuTheme, ...menu }, { signal }));
       if (choice === BACK) return undefined;
       focusedAction = choice;
       if (choice === 'model') {
@@ -185,7 +186,7 @@ async function main(): Promise<void> {
     while (true) {
       const current = (await launchPreferences.all()).agents[agent];
       screen(`${agentName(agent)} defaults`, caps.discovered ? 'Models and effort read from the installed CLI' : 'Using configured models because local discovery was unavailable', agent);
-      const choice = await promptWithBack(signal => select<'model' | 'effort'>({ message: 'Choose a default', pageSize: 5, default: focusedOption, choices: [
+      const choice = await promptWithBack(signal => select<'model' | 'effort'>({ message: 'Choose a default', pageSize: 5, theme: menuTheme, default: focusedOption, choices: [
         { name: `◈  Model · ${accent(bold(modelDisplay(current.model, caps)))}`, value: 'model' },
         { name: `✦  Effort · ${warning(bold(effortLabel(current.effort)))}`, value: 'effort' }
       ] }, { signal }));
@@ -213,7 +214,7 @@ async function main(): Promise<void> {
       const current = preferences.prompts[provider.identity]?.[kind] ?? configured;
       const label = kind === 'bug' ? 'Bug' : 'User Story';
       screen(`${label} prompt default`, current);
-      const choice = await promptWithBack(signal => select({ message: 'Prompt template', pageSize: 5, choices: [
+      const choice = await promptWithBack(signal => select({ message: 'Prompt template', pageSize: 5, theme: menuTheme, choices: [
         { name: 'Edit prompt template', value: 'edit' },
         { name: 'Use configured provider template', value: 'reset' }
       ] }, { signal }));
@@ -231,7 +232,7 @@ async function main(): Promise<void> {
     while (true) {
       const preferences = await launchPreferences.all();
       screen('Launch defaults', 'Preselected for new sessions · every launch can override them');
-      const choice = await promptWithBack(signal => select({ message: 'Choose a default', pageSize: 7, choices: [
+      const choice = await promptWithBack(signal => select({ message: 'Choose a default', pageSize: 7, theme: menuTheme, choices: [
         { name: `Claude Code · ${modelLabel(preferences.agents.claude.model)} · ${effortLabel(preferences.agents.claude.effort)}`, value: 'claude' },
         { name: `Codex · ${modelLabel(preferences.agents.codex.model)} · ${effortLabel(preferences.agents.codex.effort)}`, value: 'codex' },
         { name: 'Bug prompt template', value: 'bug' },
@@ -254,7 +255,7 @@ async function main(): Promise<void> {
     const existing = await store.list(ticketKey(ticket));
     const matches = available.filter(candidate => !existing.some(session => session.agent === candidate.agent && session.sessionId === candidate.sessionId));
     if (!matches.length) { console.log('No unrecorded native session with this exact ticket prompt was found.'); return; }
-    const index = await promptWithBack(signal => select({ message: 'Record a session for this ticket', pageSize: 12, choices: matches.map((candidate, index) => ({ name: `${candidate.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(candidate.createdAt).toLocaleString()} · ${candidate.cwd}`, value: index })) }, { signal }));
+    const index = await promptWithBack(signal => select({ message: 'Record a session for this ticket', pageSize: 12, theme: menuTheme, choices: matches.map((candidate, index) => ({ name: `${candidate.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(candidate.createdAt).toLocaleString()} · ${candidate.cwd}`, value: index })) }, { signal }));
     if (index === BACK) return;
     const candidate = matches[index]!;
     if (!await directoryExists(candidate.cwd) || !await nativeExists(candidate)) { console.log('Native session or working directory is no longer available.'); return; }
@@ -265,7 +266,7 @@ async function main(): Promise<void> {
     const sessions = await store.list(key);
     if (!sessions.length) { console.log('No session recorded for this ticket.'); return; }
     if (sessions.length > 1 || confirmSingle) screen(title, 'Choose a saved conversation', 'resume');
-    const index = sessions.length === 1 && !confirmSingle ? 0 : await promptWithBack(signal => select({ message: 'Resume session', pageSize: 12, choices: sessions.map((s, index) => ({ name: `${s.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(s.lastUsedAt ?? s.createdAt).toLocaleString()} · ${s.cwd}`, value: index })) }, { signal }));
+    const index = sessions.length === 1 && !confirmSingle ? 0 : await promptWithBack(signal => select({ message: 'Resume session', pageSize: 12, theme: menuTheme, choices: sessions.map((s, index) => ({ name: `${s.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${new Date(s.lastUsedAt ?? s.createdAt).toLocaleString()} · ${s.cwd}`, value: index })) }, { signal }));
     const session = index === BACK ? undefined : sessions[index];
     if (!session) return;
     if (!await directoryExists(session.cwd)) { console.log(`Working directory no longer exists: ${session.cwd}`); return; }
@@ -287,7 +288,7 @@ async function main(): Promise<void> {
       ];
       if (ticket.type === 'Unsupported') console.log(`  ${warning('No action mapped for this ticket type.')} ${muted('Set its type ID in config.json to enable it.')}\n`);
       console.log(`  ${muted('↑↓ move · Enter select · Esc back · Ctrl+C exit')}\n`);
-      const choice = await promptWithBack(signal => select({ message: 'Choose an action', pageSize: 8, choices: [...choices, ...(sessions.length ? [{ name: `Resume saved session${sessions.length > 1 ? `s (${sessions.length})` : ''}`, value: 'resume' }] : []), ...(ticket.type !== 'Unsupported' ? [{ name: 'Find existing native session', value: 'recover' }] : [])] }, { signal }));
+      const choice = await promptWithBack(signal => select({ message: 'Choose an action', pageSize: 8, theme: menuTheme, choices: [...choices, ...(sessions.length ? [{ name: `Resume saved session${sessions.length > 1 ? `s (${sessions.length})` : ''}`, value: 'resume' }] : []), ...(ticket.type !== 'Unsupported' ? [{ name: 'Find existing native session', value: 'recover' }] : [])] }, { signal }));
       if (choice === BACK) return;
       try {
         if (choice === 'resume') await resumeForKey(ticketKey(ticket), `#${ticket.id} ${ticket.title}`);
@@ -330,7 +331,7 @@ async function main(): Promise<void> {
     while (true) {
       screen(query.name, 'Saved query · ticket results load on first open');
       const pinned = Boolean((await queryPreferences.all())[`${provider.identity}:${query.id}`]?.pinned);
-      const choice = await promptWithBack(signal => select({ message: 'What would you like to do?', choices: [
+      const choice = await promptWithBack(signal => select({ message: 'What would you like to do?', theme: menuTheme, choices: [
         { name: 'Browse tickets', value: 'browse' },
         { name: '↻  Refresh query results', value: 'refresh' },
         { name: pinned ? '★  Unpin query' : '☆  Pin query', value: 'pin' }
@@ -389,7 +390,7 @@ async function main(): Promise<void> {
     if (cachedMine) await dashboardHistory.record(provider.identity, cachedMine.value, new Date(cachedMine.fetchedAt));
     const dashboard = buildDashboard(cachedMine?.value ?? [], cachedMine?.fetchedAt, await store.all(), provider.identity, await dashboardHistory.list(provider.identity));
     console.log(`${renderDashboard(dashboard)}\n`);
-    const choice = await promptWithBack(signal => select({ message: 'Choose a view', choices: [
+    const choice = await promptWithBack(signal => select({ message: 'Choose a view', theme: menuTheme, choices: [
       { name: 'My tickets', value: 'mine' },
       { name: 'Saved queries', value: 'queries' },
       { name: 'My sessions', value: 'sessions' },

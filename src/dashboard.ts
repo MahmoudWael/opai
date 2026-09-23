@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { configDir } from './config.js';
 import type { Ticket } from './providers/types.js';
 import type { Registry, Session } from './sessions/store.js';
+import { accent, bold, danger, good, warning } from './ui.js';
 
 export interface DailySnapshot { date: string; refreshedAt: number; ticketIds: string[]; total: number }
 type History = Record<string, DailySnapshot[]>;
@@ -110,31 +111,73 @@ function fit(value: string, width: number): string {
   const chars = [...value];
   return chars.length > width ? `${chars.slice(0, Math.max(0, width - 1)).join('')}…` : value.padEnd(width);
 }
-export function renderDashboard(model: DashboardModel, columns = process.stdout.columns ?? 80, now = Date.now()): string {
+export interface DashboardPalette {
+  heading(value: string): string;
+  positive(value: string): string;
+  warning(value: string): string;
+  danger(value: string): string;
+  accent(value: string): string;
+  bold(value: string): string;
+}
+const defaultPalette: DashboardPalette = {
+  heading: value => bold(accent(value)),
+  positive: good,
+  warning,
+  danger,
+  accent,
+  bold
+};
+function styledCell(raw: string, styled: string, width: number): string {
+  return `${styled}${' '.repeat(Math.max(0, width - [...raw].length))}`;
+}
+export function renderDashboard(model: DashboardModel, columns = process.stdout.columns ?? 80, now = Date.now(), palette: DashboardPalette = defaultPalette): string {
   const statusMax = Math.max(...model.statuses.map(([, count]) => count), 1);
   const agentMax = Math.max(model.agents.claude, model.agents.codex, 1);
   const width = Math.max(4, Math.min(8, Math.floor(columns / 10)));
   const half = Math.max(30, Math.floor((columns - 5) / 2));
-  const statusCells = model.statuses.length ? model.statuses.map(([name, count]) => `${fit(name, 14)} ${bar(count, statusMax, width)} ${String(count).padStart(2)}`) : ['No cached tickets yet'];
+  const statusCells = model.statuses.length ? model.statuses.map(([name, count]) => {
+    const chart = bar(count, statusMax, width);
+    const number = String(count).padStart(2);
+    return {
+      raw: `${fit(name, 14)} ${chart} ${number}`,
+      styled: `${fit(name, 14)} ${palette.accent(chart)} ${palette.bold(number)}`
+    };
+  }) : [{ raw: 'No cached tickets yet', styled: 'No cached tickets yet' }];
   const statusRows: string[] = [];
-  for (let index = 0; index < statusCells.length; index += 2) statusRows.push(`  ${fit(statusCells[index], half)} ${statusCells[index + 1] ?? ''}`.trimEnd());
-  const trend = `${spark(model.trend.map(item => item.count))}${model.trend.length ? `  ${model.trend.map(item => item.label).join(' ')}` : ''}`;
+  for (let index = 0; index < statusCells.length; index += 2) {
+    const first = statusCells[index]!;
+    statusRows.push(`  ${styledCell(first.raw, first.styled, half)} ${statusCells[index + 1]?.styled ?? ''}`.trimEnd());
+  }
+  const trendGraph = spark(model.trend.map(item => item.count));
+  const trend = `${palette.accent(trendGraph)}${model.trend.length ? `  ${model.trend.map(item => item.label).join(' ')}` : ''}`;
   const recentMeta = model.recent ? ` · ${model.recent.status ?? 'Status unavailable'} · ${model.recent.agent} · ${ago(model.recent.at, now)}` : '';
-  const recent = model.recent ? `#${model.recent.id}  ${fit(model.recent.title, Math.max(10, columns - recentMeta.length - model.recent.id.length - 7)).trimEnd()}${recentMeta}` : 'No agent activity yet';
+  const recent = model.recent
+    ? `${palette.accent(`#${model.recent.id}`)}  ${palette.bold(fit(model.recent.title, Math.max(10, columns - recentMeta.length - model.recent.id.length - 7)).trimEnd())}${recentMeta}`
+    : 'No agent activity yet';
+  const claudeRaw = `Claude  ${bar(model.agents.claude, agentMax, width)} ${model.agents.claude}`;
+  const codexRaw = `Codex   ${bar(model.agents.codex, agentMax, width)} ${model.agents.codex}`;
+  const claudeStyled = `Claude  ${palette.accent(bar(model.agents.claude, agentMax, width))} ${palette.bold(String(model.agents.claude))}`;
+  const codexStyled = `Codex   ${palette.accent(bar(model.agents.codex, agentMax, width))} ${palette.bold(String(model.agents.codex))}`;
+  const activityGraph = spark(model.activity.map(item => item.count));
+  const questMessage = model.open === 0
+    ? palette.positive('(˶ᵔ ᵕ ᵔ˶)  Quest board clear!')
+    : model.clearedThisWeek
+      ? palette.positive(`( •̀ᴗ•́)⚔  ${model.clearedThisWeek} quest${model.clearedThisWeek === 1 ? '' : 's'} cleared this week!`)
+      : palette.warning(`( •̀ᴗ•́)✧  ${model.open} quest${model.open === 1 ? '' : 's'} await you!`);
   const lines = [
-    `  ⚔  Open ${model.open}   🐞 Bugs ${model.bugs}   📜 Stories ${model.stories}   ✦ Sessions ${model.sessions}   ↻ ${model.refreshedAt ? ago(model.refreshedAt, now) : 'never'}`,
-    `  ▶  ${model.resumable} ticket${model.resumable === 1 ? '' : 's'} ready to resume`,
-    '', '  QUEST STATUS',
+    `  ⚔  Open ${palette.warning(String(model.open))}   🐞 Bugs ${palette.danger(String(model.bugs))}   📜 Stories ${palette.accent(String(model.stories))}   ✦ Sessions ${palette.positive(String(model.sessions))}   ↻ ${model.refreshedAt ? ago(model.refreshedAt, now) : 'never'}`,
+    `  ▶  ${palette.positive(String(model.resumable))} ticket${model.resumable === 1 ? '' : 's'} ready to resume`,
+    '', `  ${palette.heading('QUEST STATUS')}`,
     ...statusRows,
-    '', `  ${fit('AGENT PARTY', half)} WEEKLY QUESTS`,
-    `  ${fit(`Claude  ${bar(model.agents.claude, agentMax, width)} ${model.agents.claude}`, half)} Touched  [${bar(model.touchedThisWeek, model.weeklyGoal, width)}] ${model.touchedThisWeek}/${model.weeklyGoal}`,
-    `  ${fit(`Codex   ${bar(model.agents.codex, agentMax, width)} ${model.agents.codex}`, half)} Cleared  [${bar(model.clearedThisWeek, model.clearGoal, width)}] ${model.clearedThisWeek}/${model.clearGoal} from board`,
-    '', `  ${fit('7-DAY ACTIVITY', half)} OPEN QUEST TREND`,
-    `  ${fit(model.activity.map(item => item.label).join('  '), half)} ${trend}`,
-    `  ${spark(model.activity.map(item => item.count))}`,
-    '', '  LAST QUEST',
+    '', `  ${palette.heading(fit('AGENT PARTY', half))} ${palette.heading('WEEKLY QUESTS')}`,
+    `  ${styledCell(claudeRaw, claudeStyled, half)} Touched  [${palette.accent(bar(model.touchedThisWeek, model.weeklyGoal, width))}] ${palette.positive(`${model.touchedThisWeek}/${model.weeklyGoal}`)}`,
+    `  ${styledCell(codexRaw, codexStyled, half)} Cleared  [${palette.accent(bar(model.clearedThisWeek, model.clearGoal, width))}] ${palette.positive(`${model.clearedThisWeek}/${model.clearGoal}`)} from board`,
+    '', `  ${palette.heading(fit('7-DAY ACTIVITY', half))} ${palette.heading('OPEN QUEST TREND')}`,
+    `  ${styledCell(model.activity.map(item => item.label).join('  '), model.activity.map(item => item.label).join('  '), half)} ${trend}`,
+    `  ${palette.accent(activityGraph)}`,
+    '', `  ${palette.heading('LAST QUEST')}`,
     `  ${recent}`,
-    '', `  ${model.open === 0 ? '(˶ᵔ ᵕ ᵔ˶)  Quest board clear!' : model.clearedThisWeek ? `( •̀ᴗ•́)⚔  ${model.clearedThisWeek} quest${model.clearedThisWeek === 1 ? '' : 's'} cleared this week!` : `( •̀ᴗ•́)✧  ${model.open} quest${model.open === 1 ? '' : 's'} await you!`}`
+    '', `  ${questMessage}`
   ];
   return lines.join('\n');
 }
