@@ -47,7 +47,7 @@ Coding agents can work from ticket IDs, but the surrounding workflow is still ea
 
 ## Features
 
-- Searchable assigned-ticket and saved-query lists
+- Searchable assigned-ticket, saved-query, and session lists that retain their filter and selection when you return
 - Bug and User Story actions based on stable type IDs from your OpenProject instance
 - Interactive Claude Code and Codex processes with normal permission prompts
 - Per-session model, effort, and prompt choices with saved launch defaults
@@ -56,7 +56,9 @@ Coding agents can work from ticket IDs, but the surrounding workflow is still ea
 - Exact-session resume in the original working directory
 - Recovery of existing native sessions whose first prompt matches the ticket exactly
 - Persistent ticket, query, and session data across terminals, tmux sessions, and WSL restarts
-- Eight-hour disk cache by default, plus explicit refresh actions
+- Eight-hour disk cache by default, in-list refresh, new-ticket markers, and stale-cache fallback
+- Conventional `--help` and `--version` commands plus `opai init` for first-run configuration
+- Cached npm release notifications, checked every seven days by default
 - Pinned and recently opened saved queries stored locally
 - Local dashboard for ticket status, agent use, recent activity, and resumable work
 - Read-only OpenProject integration
@@ -124,10 +126,13 @@ In OpenProject, open **Account settings -> Access tokens**, select **+ API Token
 
 ### 2. Create the OPAI configuration
 
+Create a sample configuration from any directory:
+
 ```sh
-mkdir -p ~/.config/opai
-cp config.example.json ~/.config/opai/config.json
+opai init
 ```
+
+This creates `~/.config/opai/config.json` without overwriting an existing file.
 
 Edit `~/.config/opai/config.json`:
 
@@ -138,12 +143,14 @@ Edit `~/.config/opai/config.json`:
     "instanceId": "work",
     "bugTypeId": 7,
     "userStoryTypeId": 6,
+    "requestTimeoutSeconds": 15,
     "promptTemplates": {
       "bug": "fix openproject bug {{id}}",
       "userStory": "implement openproject user story {{id}}"
     }
   },
   "cacheTtlHours": 8,
+  "updateCheckDays": 7,
   "cwd": "/home/you/projects/your-repository",
   "agents": {
     "claude": "claude",
@@ -164,9 +171,11 @@ Replace the sample values with values from your OpenProject instance:
 | `openproject.instanceId` | Yes | Stable local name that distinguishes this OpenProject instance in session keys |
 | `openproject.bugTypeId` | Yes | Numeric type ID used by this instance for Bugs |
 | `openproject.userStoryTypeId` | Yes | Numeric type ID used by this instance for User Stories |
+| `openproject.requestTimeoutSeconds` | No | OpenProject request timeout from `1` to `120` seconds; defaults to `15` |
 | `openproject.promptTemplates.bug` | No | Default Bug prompt template; must contain `{{id}}` |
 | `openproject.promptTemplates.userStory` | No | Default User Story prompt template; must contain `{{id}}` |
 | `cacheTtlHours` | No | Cache lifetime greater than `0` and at most `168` hours; defaults to `8` |
+| `updateCheckDays` | No | Days between npm release checks, from `1` to `90`; defaults to `7`. Set `0` to disable checks |
 | `cwd` | No | Working directory passed to agents; defaults to the directory where `opai` was started |
 | `agents.claude` | No | Claude executable name or absolute path |
 | `agents.codex` | No | Codex executable name or absolute path |
@@ -203,6 +212,9 @@ Available shortcuts:
 opai mine             # Open assigned tickets
 opai show 4521        # Open one ticket
 opai resume 4521      # Choose a saved session for one ticket
+opai init             # Create ~/.config/opai/config.json
+opai --help           # Show command help
+opai --version        # Show the installed version
 ```
 
 ### Navigation
@@ -212,12 +224,13 @@ opai resume 4521      # Choose a saved session for one ticket
 | `Up` / `Down` | Move through a list |
 | Type | Filter tickets, queries, or sessions |
 | `Enter` | Open the selected item |
-| `Esc` | Return to the previous screen |
+| `Left Arrow` | Return to the previous screen; in searchable lists, the filter must be empty |
+| `Esc` | Return to the previous screen from anywhere |
 | `Ctrl+C` | Exit OPAI |
 
 ### Home views
 
-- **My tickets** reads assigned, open OpenProject work packages.
+- **My tickets** reads assigned, open OpenProject work packages. Newly observed assignments are promoted to the top and marked with a green dot after refresh; the marker clears when you open the ticket. Known tickets keep their existing order so unrelated edits do not reshuffle the list. Choose **Refresh this list** at the bottom without returning Home.
 - **Saved queries** reads the queries visible to your OpenProject account. Pinning and recent-query ordering are local preferences and never alter the remote query.
 - **My sessions** opens recorded conversations without fetching tickets again.
 - **Refresh my tickets** bypasses the cache and updates matching statuses in saved sessions.
@@ -299,10 +312,23 @@ OPAI stores local state below `~/.config/opai/`:
 | `query-preferences.json` | Pinned and recently opened queries |
 | `launch-preferences.json` | Per-agent model and effort defaults plus provider prompt defaults |
 | `dashboard-history.json` | Daily local snapshots used by dashboard statistics |
+| `update-check.json` | Last npm release check and latest stable version |
 
-Opening OPAI does not automatically call OpenProject while a valid cached list exists. The default cache lifetime is eight hours, so reopening it in another terminal reuses the same list. After expiry, the next access reloads that list. Refresh actions always fetch immediately.
+Opening OPAI does not automatically call OpenProject while a valid cached list exists. The default cache lifetime is eight hours, so reopening it in another terminal reuses the same list. After expiry, the next access reloads that list. If that automatic reload fails, OPAI shows the stale cached list and reports the failure in the header. Explicit refresh actions always fetch immediately and report errors instead of pretending the stale data is fresh.
+
+OpenProject's normal work-package response does not include the time when an assignee was added. On the first load, OPAI asks OpenProject for tickets ordered by `updatedAt` descending. On later refreshes, it compares the fresh response with the persisted cache, moves newly observed assignments to the top, and preserves the order of known tickets. This gives stable newest-assignment behavior without extra activity-history API requests.
 
 Cache namespaces include the provider identity, URL, type mapping, and a one-way hash derived from the token. Cache files do not contain the token.
+
+## Update notifications
+
+OPAI checks npm for the package's stable `latest` version every seven days by default. The result is cached, so reopening OPAI does not repeat the request. When a newer version exists, Home shows:
+
+```text
+↑ OPAI 0.1.2 available · npm i -g @mahmoudwael/opai@latest
+```
+
+The check is read-only, times out after three seconds, and stays silent when npm is unavailable. OPAI never installs an update automatically. Set `updateCheckDays` to a longer interval or `0` to disable the check.
 
 ## Read-only OpenProject access
 
@@ -347,9 +373,9 @@ V1 intentionally includes one static provider implementation. It has no plugin l
 
 ## Troubleshooting
 
-### `Create ~/.config/opai/config.json from config.example.json`
+### `Run opai init to create ~/.config/opai/config.json`
 
-Create the configuration file and replace every sample OpenProject value with the values from your instance.
+Run `opai init`, then replace every sample OpenProject value with the values from your instance.
 
 ### `OpenProject API returned HTTP 401`
 

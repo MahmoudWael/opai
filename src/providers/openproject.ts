@@ -40,8 +40,11 @@ export class OpenProjectProvider implements TicketProvider {
   }
   private async getJson<T>(path: string): Promise<T> {
     let response: Response;
-    try { response = await this.request(`${this.base}${path}`, { method: 'GET', headers: { Authorization: `Basic ${Buffer.from(`apikey:${this.token}`).toString('base64')}`, Accept: 'application/hal+json' } }); }
+    const timeoutSeconds = this.config.requestTimeoutSeconds ?? 15;
+    const signal = AbortSignal.timeout(timeoutSeconds * 1000);
+    try { response = await this.request(`${this.base}${path}`, { method: 'GET', signal, headers: { Authorization: `Basic ${Buffer.from(`apikey:${this.token}`).toString('base64')}`, Accept: 'application/hal+json' } }); }
     catch (error) {
+      if (signal.aborted) throw new Error(`OpenProject request timed out after ${timeoutSeconds}s at ${this.base}.`, { cause: error });
       const cause = (error as { cause?: { code?: string } }).cause?.code;
       throw new Error(`Could not connect to OpenProject at ${this.base}${cause ? ` (${cause})` : ''}. Check openproject.url, DNS, VPN, and TLS.`, { cause: error });
     }
@@ -52,9 +55,10 @@ export class OpenProjectProvider implements TicketProvider {
     const user = await this.getJson<{ id: number }>('/api/v3/users/me');
     if (!Number.isInteger(user.id)) throw new Error('OpenProject did not return a user ID.');
     const filters = JSON.stringify([{ assignee: { operator: '=', values: [String(user.id)] } }, { status: { operator: 'o', values: [] } }]);
+    const sortBy = JSON.stringify([['updatedAt', 'desc']]);
     const result: Ticket[] = [];
     for (let offset = 1; ; ) {
-      const query = new URLSearchParams({ filters, offset: String(offset), pageSize: '100' });
+      const query = new URLSearchParams({ filters, sortBy, offset: String(offset), pageSize: '100' });
       const page = await this.getJson<Collection>(`/api/v3/work_packages?${query}`);
       const elements = page._embedded?.elements;
       if (!Array.isArray(elements) || !Number.isInteger(page.total)) throw new Error('Invalid OpenProject work package collection.');

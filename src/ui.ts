@@ -71,13 +71,13 @@ function truncateVisible(value: string, max: number): string {
   return `${result}…`;
 }
 function padVisible(value: string, width: number): string { return value + ' '.repeat(Math.max(0, width - visibleWidth(value))); }
-export function ticketRow(ticket: Ticket, columns = process.stdout.columns ?? 80): string {
+export function ticketRow(ticket: Ticket, columns = process.stdout.columns ?? 80, isNew = false): string {
   const rawBadge = ticket.type === 'Bug' ? 'Bug' : ticket.type === 'User Story' ? 'US' : truncate(ticket.typeLabel, 24);
   const usableWidth = Math.max(20, columns - 4);
   const typeWidth = 3;
   const statusWidth = 11;
   const priorityWidth = 8;
-  const fixedWidth = 8 + 1 + 2 + typeWidth + 1 + statusWidth + 2 + priorityWidth;
+  const fixedWidth = 8 + 1 + 2 + 2 + typeWidth + 1 + statusWidth + 2 + priorityWidth;
   const titleWidth = Math.max(6, Math.min(58, usableWidth - fixedWidth));
   const id = truncate(`#${ticket.id}`, 8).padEnd(8);
   const title = truncate(ticket.title, titleWidth).padEnd(titleWidth);
@@ -85,7 +85,8 @@ export function ticketRow(ticket: Ticket, columns = process.stdout.columns ?? 80
   const status = truncate(ticket.status, statusWidth).padEnd(statusWidth);
   const priority = truncate(ticket.priority?.name ?? '', priorityWidth).padEnd(priorityWidth);
   const badge = ticket.type === 'Bug' ? danger(type) : ticket.type === 'User Story' ? accent(type) : warning(type);
-  return `${accent(id)} ${title}  ${badge} ${muted(status)}  ${ticket.priority ? bold(priority) : priority}`;
+  const marker = isNew ? good('●') : ' ';
+  return `${accent(id)} ${marker} ${title}  ${badge} ${muted(status)}  ${ticket.priority ? bold(priority) : priority}`;
 }
 export function listHighlight(value: string, columns = process.stdout.columns ?? 80): string {
   const width = Math.max(1, columns - 2);
@@ -199,7 +200,7 @@ export function screen(title: string, subtitle?: string, mood?: MascotMood): voi
     : parts.art.map((art, index) => `${magic(art)}${styleContent(parts.content[index]!, index)}`).join('\n');
   console.log(`\n${styled}\n`);
 }
-export function hint(): string { return muted('↑↓ move · type to filter · Enter select · Esc back · Ctrl+C exit'); }
+export function hint(): string { return muted('↑↓ move · type to filter · Enter select · ← back · Ctrl+C exit'); }
 
 export function renderGoodbye(mood: IdleMascotMood = idleMascotMood): string {
   const art = mood === 'rabbit'

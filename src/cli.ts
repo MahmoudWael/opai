@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
-import { input, password, select, search, Separator } from '@inquirer/prompts';
-import { loadConfig } from './config.js';
+import { input, password, select, Separator } from '@inquirer/prompts';
+import { configDir, loadConfig } from './config.js';
 import { OpenProjectProvider } from './providers/openproject.js';
 import { ticketKey, type PromptKind, type SavedQuery, type Ticket, type TicketProvider } from './providers/types.js';
-import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
+import { ListCache, isSavedQueryList, isTicketList, newlyAssignedTicketIds, orderAssignedTickets } from './list-cache.js';
 import { loadApiToken, saveApiToken, tokenPath } from './token.js';
 import { SessionStore, sessionTickets, type Session } from './sessions/store.js';
 import { syncSessionTickets } from './sessions/sync.js';
@@ -23,16 +23,31 @@ import { modelLabel, resolvePreferredModel, type ModelPreference } from './model
 import { availableEfforts, discoverAgentCapabilities, resolveEffort, type AgentCapabilities } from './agents/capabilities.js';
 import { buildLaunchMenu, editablePromptConfig, launchDefaultsRow, launchDefaultsSummary, menuSectionHeader, promptDefaultsSummary, type LaunchAction } from './launch-menu.js';
 import { MascotRotationStore } from './ui-state.js';
+import { cliHelp, initializeConfig, packageVersion, parseCliCommand } from './command.js';
+import { persistentSearch } from './persistent-search.js';
+import { join } from 'node:path';
+import { UpdateChecker } from './update-check.js';
 function aborted(error: unknown): boolean { return error instanceof Error && error.name === 'ExitPromptError'; }
 class ExitToTerminal extends Error {}
-const menuTheme = { icon: { cursor: selectionCursor() }, style: { highlight: accent } };
-const listTheme = { ...menuTheme, style: { ...menuTheme.style, highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · Esc back` } };
+let showGoodbye = true;
+const menuTheme = { icon: { cursor: selectionCursor() }, style: { highlight: accent, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · ← back` } };
+const listTheme = { ...menuTheme, style: { ...menuTheme.style, highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · ← back` } };
 async function directoryExists(path: string): Promise<boolean> { try { return (await stat(path)).isDirectory(); } catch { return false; } }
 async function nativeExists(session: Session): Promise<boolean> {
   if (session.agent === 'codex') return nativeCodexSessionExists(session.sessionId);
   return nativeClaudeSessionExists(session.sessionId);
 }
 async function main(): Promise<void> {
+  const command = parseCliCommand(process.argv.slice(2));
+  if (command.kind === 'help') { showGoodbye = false; console.log(cliHelp); return; }
+  if (command.kind === 'version') { showGoodbye = false; console.log(await packageVersion()); return; }
+  if (command.kind === 'init') {
+    showGoodbye = false;
+    const destination = join(configDir, 'config.json');
+    await initializeConfig(destination);
+    console.log(`Created ${destination}. Edit the OpenProject URL and type IDs, then run opai.`);
+    return;
+  }
   const config = await loadConfig();
   setIdleMascotMood(await new MascotRotationStore().next());
   let apiToken = await loadApiToken();
@@ -51,23 +66,27 @@ async function main(): Promise<void> {
   const launchPreferences = new LaunchPreferenceStore();
   const namespace = createHash('sha256').update(JSON.stringify([provider.identity, config.openproject.url, config.openproject.bugTypeId, config.openproject.userStoryTypeId, apiToken])).digest('hex');
   const cacheTtlMs = (config.cacheTtlHours ?? 8) * 60 * 60 * 1000;
+  const assignedTicketsCacheKey = 'mine:assignment-order-v1';
+  let newAssignedIds = new Set<string>();
   const ticketCache = new ListCache<Ticket[]>(namespace, cacheTtlMs, isTicketList);
   const queryCache = new ListCache<SavedQuery[]>(namespace, cacheTtlMs, isSavedQueryList);
   async function cachedList<T extends unknown[]>(cache: ListCache<T>, key: string, load: () => Promise<T>, label: string, noun: string, refresh = false): Promise<T> {
-    let fetched = false;
-    const value = await cache.get(key, () => {
-      fetched = true;
+    const result = await cache.getWithMetadata(key, () => {
       return statusBar.run(`Loading ${label}`, load, items => `${items.length} ${noun} loaded`);
     }, refresh);
-    if (!fetched) statusBar.set('cached', `${value.length} ${noun} from cache`);
-    return value;
+    if (result.source === 'stale') statusBar.set('error', `Refresh failed · showing ${result.value.length} stale ${noun}`);
+    else if (result.source !== 'network') statusBar.set('cached', `${result.value.length} ${noun} from cache`);
+    return result.value;
   }
   async function cachedTickets(key: string, load: () => Promise<Ticket[]>, label: string, refresh = false, includeMissing = false): Promise<Ticket[]> {
     let unavailable: string[] = [];
     const tickets = await cachedList(ticketCache, key, async () => {
-      const fresh = await load();
+      const loaded = await load();
+      const previous = key === assignedTicketsCacheKey ? (await ticketCache.peek(key))?.value : undefined;
+      if (key === assignedTicketsCacheKey) newAssignedIds = newlyAssignedTicketIds(previous, loaded);
+      const fresh = key === assignedTicketsCacheKey ? orderAssignedTickets(previous, loaded) : loaded;
       unavailable = (await syncSessionTickets(store, provider, fresh, includeMissing)).unavailable;
-      if (key === 'mine') await dashboardHistory.record(provider.identity, fresh);
+      if (key === assignedTicketsCacheKey) await dashboardHistory.record(provider.identity, fresh);
       return fresh;
     }, label, 'tickets', refresh);
     if (unavailable.length) console.warn(`Could not refresh saved status for ticket${unavailable.length === 1 ? '' : 's'} ${unavailable.map(id => `#${id}`).join(', ')}.`);
@@ -156,7 +175,7 @@ async function main(): Promise<void> {
         const selected = await selectEffort(agent, effort, model, caps);
         if (selected !== BACK) effort = selected;
       } else if (choice === 'prompt') {
-        const selected = await promptWithBack(signal => input(editablePromptConfig('Initial prompt template', template), { signal }));
+        const selected = await promptWithBack(signal => input(editablePromptConfig('Initial prompt template', template), { signal }), process.stdin, { quickBack: false });
         if (selected !== BACK) template = selected;
       } else if (choice === 'reset-prompt') {
         template = provider.promptTemplate(kind);
@@ -241,7 +260,7 @@ async function main(): Promise<void> {
       if (choice === BACK) return;
       if (choice === 'reset') await launchPreferences.setPrompt(provider.identity, kind, null);
       else {
-        const selected = await promptWithBack(signal => input(editablePromptConfig(`${label} prompt template`, current), { signal }));
+        const selected = await promptWithBack(signal => input(editablePromptConfig(`${label} prompt template`, current), { signal }), process.stdin, { quickBack: false });
         if (selected === BACK) continue;
         await launchPreferences.setPrompt(provider.identity, kind, selected);
       }
@@ -255,12 +274,9 @@ async function main(): Promise<void> {
       screen('Launch defaults', 'Preselected for new sessions · every launch can override them');
       const choice = await promptWithBack(signal => select<'claude' | 'codex' | PromptKind>({ message: 'Choose a default', pageSize: 9, theme: menuTheme, choices: [
         new Separator(accent(bold(menuSectionHeader('Agent defaults')))),
-        new Separator(''),
         { name: launchDefaultsRow('Claude Code', launchDefaultsSummary(modelLabel(preferences.agents.claude.model), effortLabel(preferences.agents.claude.effort))), value: 'claude' },
         { name: launchDefaultsRow('Codex', launchDefaultsSummary(modelLabel(preferences.agents.codex.model), effortLabel(preferences.agents.codex.effort))), value: 'codex' },
-        new Separator(''),
         new Separator(accent(bold(menuSectionHeader('Prompt defaults')))),
-        new Separator(''),
         { name: launchDefaultsRow('Bug prompt', promptDefaultsSummary(promptPreferences?.bug !== undefined)), value: 'bug' },
         { name: launchDefaultsRow('User Story prompt', promptDefaultsSummary(promptPreferences?.userStory !== undefined)), value: 'userStory' }
       ] }, { signal }));
@@ -319,7 +335,7 @@ async function main(): Promise<void> {
         { name: `${action} with Codex`, value: 'codex', description: 'Review launch options, then start a native Codex session' }
       ];
       if (ticket.type === 'Unsupported') console.log(`  ${warning('No action mapped for this ticket type.')} ${muted('Set its type ID in config.json to enable it.')}\n`);
-      console.log(`  ${muted('↑↓ move · Enter select · Esc back · Ctrl+C exit')}\n`);
+      console.log(`  ${muted('↑↓ move · Enter select · ← back · Ctrl+C exit')}\n`);
       const choice = await promptWithBack(signal => select({ message: 'Choose an action', pageSize: 8, theme: menuTheme, choices: [...choices, ...(sessions.length ? [{ name: `Resume saved session${sessions.length > 1 ? `s (${sessions.length})` : ''}`, value: 'resume' }] : []), ...(ticket.type !== 'Unsupported' ? [{ name: 'Find existing native session', value: 'recover' }] : [])] }, { signal }));
       if (choice === BACK) return;
       try {
@@ -337,29 +353,44 @@ async function main(): Promise<void> {
       }
     }
   }
-  const args = process.argv.slice(2);
-  if (args.length && args[0] !== 'mine' && args[0] !== 'show' && args[0] !== 'resume') throw new Error('Usage: opai [mine | show <id> | resume <id>]');
-  if (args[0] === 'show' || args[0] === 'resume') {
-    if (!args[1]) throw new Error('Ticket ID required.');
-    if (args[0] === 'resume') {
-      if (!await resumeForKey(`${provider.identity}:${args[1]}`, `Ticket #${args[1]}`, true)) return;
+  if (command.kind === 'show' || command.kind === 'resume') {
+    if (command.kind === 'resume') {
+      if (!await resumeForKey(`${provider.identity}:${command.id}`, `Ticket #${command.id}`, true)) return;
     } else {
-      const ticket = await statusBar.run(`Loading ticket #${args[1]}`, () => provider.get(args[1]), item => `Ticket #${item.id} loaded`);
+      const ticket = await statusBar.run(`Loading ticket #${command.id}`, () => provider.get(command.id), item => `Ticket #${item.id} loaded`);
       await ticketMenu(ticket);
       return;
     }
   }
   async function browseTickets(key: string, label: string, load: () => Promise<Ticket[]>): Promise<void> {
-    const tickets = await cachedTickets(key, load, label);
+    const refreshChoice = Symbol('refresh');
+    let tickets = await cachedTickets(key, load, label);
+    let searchTerm = '';
+    let lastSelected: Ticket | undefined;
     while (true) {
       screen(label, `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} · auto refresh after ${config.cacheTtlHours ?? 8}h`);
       if (!tickets.length) console.log(`  ${muted('No tickets in this list.')}\n`);
-      console.log(`  ${hint()}\n`);
-      const selected = await promptWithBack(signal => search<Ticket>({ message: 'Search by ID or title', pageSize: 12, theme: listTheme, source: async term => {
+      if (key === assignedTicketsCacheKey && newAssignedIds.size) console.log(`  ${good('● New since your last refresh')}\n`);
+      console.log(`  ${hint()} · ${muted('choose ↻ to refresh')}\n`);
+      const selected = await promptWithBack(signal => persistentSearch<Ticket | typeof refreshChoice | typeof BACK>({ message: 'Search by ID or title', pageSize: 13, theme: listTheme, initialTerm: searchTerm, defaultValue: lastSelected, backValue: BACK, equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.id === right.id, source: async term => {
+        searchTerm = term ?? '';
         const filtered = tickets.filter(ticket => `${ticket.id} ${ticket.title} ${ticket.typeLabel} ${ticket.priority?.name ?? ''}`.toLowerCase().includes((term ?? '').toLowerCase()));
-        return filtered.map(ticket => ({ name: ticketRow(ticket), value: ticket, short: `#${ticket.id} ${ticket.title}` }));
-      } }, { signal }));
+        return [
+          ...filtered.map(ticket => ({ name: ticketRow(ticket, undefined, key === assignedTicketsCacheKey && newAssignedIds.has(ticket.id)), value: ticket, short: `#${ticket.id} ${ticket.title}` })),
+          new Separator(''),
+          { name: '↻  Refresh this list', value: refreshChoice, short: 'Refresh this list' }
+        ];
+      } }, { signal }), process.stdin, { quickBack: false });
       if (selected === BACK) return;
+      if (selected === refreshChoice) {
+        try {
+          tickets = await cachedTickets(key, load, label, true, key === assignedTicketsCacheKey);
+          lastSelected = undefined;
+        } catch (error) { console.error(error instanceof Error ? error.message : String(error)); }
+        continue;
+      }
+      lastSelected = selected;
+      if (key === assignedTicketsCacheKey) newAssignedIds.delete(selected.id);
       await ticketMenu(selected);
     }
   }
@@ -390,11 +421,14 @@ async function main(): Promise<void> {
   }
   async function savedQueries(): Promise<void> {
     const queries = await cachedList(queryCache, 'saved', () => provider.listSavedQueries(), 'saved queries', 'queries');
+    let searchTerm = '';
+    let lastSelected: SavedQuery | undefined;
     while (true) {
       screen('Saved queries', `${queries.length} quer${queries.length === 1 ? 'y' : 'ies'} · auto refresh after ${config.cacheTtlHours ?? 8}h`);
-      console.log(`  ${muted('Type to search · ↑↓ move · Enter select · Esc back')}\n`);
+      console.log(`  ${muted('Type to search · ↑↓ move · Enter select · ← back')}\n`);
       const preferences = await queryPreferences.all();
-      const choice = await promptWithBack(signal => search<SavedQuery>({ message: 'Search saved queries', pageSize: 15, theme: listTheme, source: async term => {
+      const choice = await promptWithBack(signal => persistentSearch<SavedQuery | typeof BACK>({ message: 'Search saved queries', pageSize: 15, theme: listTheme, initialTerm: searchTerm, defaultValue: lastSelected, backValue: BACK, equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.id === right.id, source: async term => {
+        searchTerm = term ?? '';
         const filtered = queries.filter(query => `${query.id} ${query.name}`.toLowerCase().includes((term ?? '').toLowerCase()));
         return querySections(filtered, preferences, provider.identity).flatMap(section => {
           const heading = section.kind === 'pinned'
@@ -408,35 +442,45 @@ async function main(): Promise<void> {
             ...section.queries.map(query => ({ name: `${marker}  ${query.name}`, value: query, short: query.name }))
           ];
         });
-      } }, { signal }));
+      } }, { signal }), process.stdin, { quickBack: false });
       if (choice === BACK) return;
       const query = choice;
+      lastSelected = query;
       await queryPreferences.opened(provider.identity, query.id);
       await queryMenu(query);
     }
   }
   async function mySessions(): Promise<void> {
+    let searchTerm = '';
+    let lastSelectedKey: string | undefined;
     while (true) {
       const groups = sessionTickets(await store.all(), provider.identity);
       screen('My sessions', `${groups.length} ticket${groups.length === 1 ? '' : 's'} with saved conversations · local only`);
       if (!groups.length) console.log(`  ${muted('No saved sessions yet. Launch an agent from a ticket first.')}\n`);
-      console.log(`  ${muted('Type a ticket ID or title · Esc back')}\n`);
-      const choice = await promptWithBack(signal => search<(typeof groups)[number]>({ message: 'Search saved sessions', pageSize: 12, theme: listTheme, source: async term => {
+      console.log(`  ${muted('Type a ticket ID or title · ← back')}\n`);
+      const defaultGroup = groups.find(group => group.key === lastSelectedKey);
+      const choice = await promptWithBack(signal => persistentSearch<(typeof groups)[number] | typeof BACK>({ message: 'Search saved sessions', pageSize: 12, theme: listTheme, initialTerm: searchTerm, defaultValue: defaultGroup, backValue: BACK, equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.key === right.key, source: async term => {
+        searchTerm = term ?? '';
         const filtered = groups.filter(group => `${group.id} ${group.title}`.toLowerCase().includes((term ?? '').toLowerCase()));
         return filtered.map(group => ({ name: sessionRow(group), value: group, short: `#${group.id} ${group.title}` }));
-      } }, { signal }));
+      } }, { signal }), process.stdin, { quickBack: false });
       if (choice === BACK) return;
       const group = choice;
+      lastSelectedKey = group.key;
       await resumeForKey(group.key, `#${group.id} ${group.title}`, true);
     }
   }
-  if (args[0] === 'mine') { await browseTickets('mine', 'My tickets', () => provider.listAssigned()); return; }
+  if (command.kind === 'mine') { await browseTickets(assignedTicketsCacheKey, 'My tickets', () => provider.listAssigned()); return; }
+  const updateNotice = config.updateCheckDays === 0
+    ? undefined
+    : await new UpdateChecker(await packageVersion(), { intervalMs: (config.updateCheckDays ?? 7) * 86_400_000 }).check();
   while (true) {
     screen('Home', `Browse tickets or saved queries · cache expires after ${config.cacheTtlHours ?? 8}h`);
-    const cachedMine = await ticketCache.peek('mine');
+    const cachedMine = await ticketCache.peek(assignedTicketsCacheKey);
     if (cachedMine) await dashboardHistory.record(provider.identity, cachedMine.value, new Date(cachedMine.fetchedAt));
     const dashboard = buildDashboard(cachedMine?.value ?? [], cachedMine?.fetchedAt, await store.all(), provider.identity, await dashboardHistory.list(provider.identity));
     console.log(`${renderDashboard(dashboard)}\n`);
+    if (updateNotice) console.log(`  ${good(`↑ OPAI ${updateNotice.latestVersion} available`)} · ${accent('npm i -g @mahmoudwael/opai@latest')}\n`);
     const choice = await promptWithBack(signal => select({ message: 'Choose a view', theme: menuTheme, choices: [
       { name: 'My tickets', value: 'mine' },
       { name: 'Saved queries', value: 'queries' },
@@ -448,12 +492,12 @@ async function main(): Promise<void> {
     ] }, { signal }));
     if (choice === 'exit' || choice === BACK) return;
     try {
-      if (choice === 'mine') await browseTickets('mine', 'My tickets', () => provider.listAssigned());
+      if (choice === 'mine') await browseTickets(assignedTicketsCacheKey, 'My tickets', () => provider.listAssigned());
       else if (choice === 'queries') await savedQueries();
       else if (choice === 'sessions') await mySessions();
       else if (choice === 'launch-defaults') await launchDefaultsMenu();
       else if (choice === 'refresh-mine') {
-        await cachedTickets('mine', () => provider.listAssigned(), 'my tickets', true, true);
+        await cachedTickets(assignedTicketsCacheKey, () => provider.listAssigned(), 'my tickets', true, true);
       } else {
         await cachedList(queryCache, 'saved', () => provider.listSavedQueries(), 'saved queries', 'queries', true);
       }
@@ -463,7 +507,7 @@ async function main(): Promise<void> {
     }
   }
 }
-main().then(goodbye).catch(error => {
+main().then(() => { if (showGoodbye) goodbye(); }).catch(error => {
   if (aborted(error) || error instanceof ExitToTerminal) goodbye();
   else { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
 });

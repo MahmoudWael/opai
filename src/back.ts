@@ -1,9 +1,17 @@
 export const BACK = Symbol('back');
 
-export async function promptWithBack<T>(prompt: (signal: AbortSignal) => Promise<T>, input: NodeJS.EventEmitter = process.stdin): Promise<T | typeof BACK> {
+export function isQuickBackKey(key?: { name?: string; ctrl?: boolean }): boolean {
+  return key?.name === 'left';
+}
+
+export async function promptWithBack<T>(
+  prompt: (signal: AbortSignal) => Promise<T>,
+  input: NodeJS.EventEmitter = process.stdin,
+  options: { quickBack?: boolean } = {}
+): Promise<T | typeof BACK> {
   const controller = new AbortController();
   const onKeypress = (_value: string, key?: { name?: string }) => {
-    if (key?.name === 'escape') controller.abort(BACK);
+    if (key?.name === 'escape' || options.quickBack !== false && isQuickBackKey(key)) controller.abort(BACK);
   };
   input.on('keypress', onKeypress);
   try {

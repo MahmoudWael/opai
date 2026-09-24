@@ -1,6 +1,6 @@
 {
   "name": "@mahmoudwael/opai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Browse OpenProject tickets, launch Claude Code or Codex, and resume the exact native agent session.",
   "type": "module",
   "bin": {
@@ -48,6 +48,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@inquirer/core": "^10.3.2",
     "@inquirer/prompts": "^7.10.1"
   },
   "devDependencies": {

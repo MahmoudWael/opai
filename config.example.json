@@ -4,12 +4,14 @@
     "instanceId": "main",
     "bugTypeId": 1,
     "userStoryTypeId": 2,
+    "requestTimeoutSeconds": 15,
     "promptTemplates": {
       "bug": "fix openproject bug {{id}}",
       "userStory": "implement openproject user story {{id}}"
     }
   },
   "cacheTtlHours": 8,
+  "updateCheckDays": 7,
   "defaultAgent": "claude",
   "agents": {
     "claude": "claude",

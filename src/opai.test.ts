@@ -8,23 +8,25 @@ import { ticketKey } from './providers/types.js';
 import { SessionStore, sessionTickets } from './sessions/store.js';
 import { claudeLaunch, claudeResume, findClaudeTicketSessions, nativeClaudeSessionExists } from './agents/claude.js';
 import { codexLaunch, codexResume, findCodexTicketSessions, identifyCodexSession } from './agents/codex.js';
-import { ListCache, isSavedQueryList, isTicketList } from './list-cache.js';
+import { ListCache, isSavedQueryList, isTicketList, newlyAssignedTicketIds, orderAssignedTickets } from './list-cache.js';
 import { centeredMenuChoices, createOpaiPalette, listHighlight, renderAgentClosed, renderGoodbye, renderHeader, selectionCursor, sessionRow, setIdleMascotMood, sinceLastOpened, ticketRow, visibleWidth } from './ui.js';
 import { loadApiToken, saveApiToken } from './token.js';
 import { StatusBar } from './status.js';
 import { QueryPreferencesStore, orderedQueries, querySections } from './query-preferences.js';
 import { EventEmitter } from 'node:events';
 import { stripVTControlCharacters } from 'node:util';
-import { BACK, promptWithBack } from './back.js';
+import { BACK, isQuickBackKey, promptWithBack } from './back.js';
 import { syncSessionTickets } from './sessions/sync.js';
 import { DashboardHistoryStore, buildDashboard, renderDashboard } from './dashboard.js';
 import { LaunchPreferenceStore } from './launch-preferences.js';
 import { modelOptions, parseConfiguredModels, resolvePreferredModel } from './models.js';
 import { runAgent } from './agents/run.js';
 import { availableEfforts, parseClaudeHelp, parseCodexModelCatalog, resolveEffort } from './agents/capabilities.js';
-import { parsePromptTemplates } from './config.js';
+import { parseConfig, parsePromptTemplates } from './config.js';
 import { buildLaunchMenu, editablePromptConfig, launchDefaultsSummary, launchDefaultsRow, menuSectionHeader, promptDefaultsSummary } from './launch-menu.js';
 import { MascotRotationStore } from './ui-state.js';
+import { cliHelp, initializeConfig, parseCliCommand } from './command.js';
+import { UpdateChecker, isNewerVersion } from './update-check.js';
 const settings = { url: 'https://example.test', instanceId: 'main', bugTypeId: 7, userStoryTypeId: 6 };
 const unstyled = (value: string): string => stripVTControlCharacters(value);
 const wp = (id: number, type: number, name = 'Bug') => ({ id, subject: `Ticket ${id}`, _links: { type: { href: `/api/v3/types/${type}`, title: name }, status: { href: '/api/v3/statuses/4', title: 'In progress' }, priority: { href: '/api/v3/priorities/3', title: 'High' } } });
@@ -35,6 +37,8 @@ test('OpenProject paginates, filters assigned open tickets, and normalizes stabl
   const tickets = await provider.listAssigned();
   assert.deepEqual(tickets.map(x => x.type), ['Bug', 'User Story']);
   assert.deepEqual(JSON.parse(calls[1].searchParams.get('filters')!), [{ assignee: { operator: '=', values: ['42'] } }, { status: { operator: 'o', values: [] } }]);
+  assert.deepEqual(JSON.parse(calls[1].searchParams.get('sortBy')!), [['updatedAt', 'desc']]);
+  assert.equal(calls[2].searchParams.get('sortBy'), calls[1].searchParams.get('sortBy'));
   assert.equal(calls[2].searchParams.get('offset'), '2');
   assert.equal(provider.prompt(tickets[0], 'fix'), 'fix openproject bug 5');
   assert.equal(provider.prompt(tickets[1], 'implement'), 'implement openproject user story 6');
@@ -278,6 +282,50 @@ test('OpenProject connection errors report the configured host and DNS code with
     return true;
   });
 });
+test('OpenProject requests time out and configuration validates the timeout', async () => {
+  const request = ((_url: string, options?: RequestInit) => new Promise((_resolve, reject) => {
+    options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+  })) as unknown as typeof fetch;
+  const provider = new OpenProjectProvider({ ...settings, requestTimeoutSeconds: 0.001 }, 'secret-token', request);
+  await assert.rejects(provider.listAssigned(), /timed out after 0.001s/);
+  const valid = parseConfig({ openproject: { ...settings, requestTimeoutSeconds: 20 }, updateCheckDays: 7 });
+  assert.equal(valid.openproject.requestTimeoutSeconds, 20);
+  assert.equal(valid.updateCheckDays, 7);
+  assert.throws(() => parseConfig({ openproject: { ...settings, requestTimeoutSeconds: 0 } }), /integer from 1 to 120/);
+  assert.throws(() => parseConfig({ openproject: settings, updateCheckDays: 91 }), /updateCheckDays/);
+});
+test('update checks are cached for seven days and only report newer stable versions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'opai-update-test-'));
+  try {
+    let now = 1_000_000;
+    let calls = 0;
+    let latest = '0.1.2';
+    const request = (async () => { calls++; return { ok: true, json: async () => ({ version: latest }) }; }) as unknown as typeof fetch;
+    const checker = () => new UpdateChecker('0.1.1', { path: join(dir, 'update-check.json'), intervalMs: 7 * 86_400_000, request, now: () => now });
+    assert.deepEqual(await checker().check(), { currentVersion: '0.1.1', latestVersion: '0.1.2' });
+    assert.equal(calls, 1);
+    assert.deepEqual(await checker().check(), { currentVersion: '0.1.1', latestVersion: '0.1.2' });
+    assert.equal(calls, 1);
+    now += 7 * 86_400_000 + 1;
+    latest = '0.1.1';
+    assert.equal(await checker().check(), undefined);
+    assert.equal(calls, 2);
+    assert.equal(isNewerVersion('1.0.0', '0.9.9'), true);
+    assert.equal(isNewerVersion('1.0.0-beta.1', '0.9.9'), false);
+    assert.equal(isNewerVersion('invalid', '0.9.9'), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('failed update checks stay silent and respect the cached retry interval', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'opai-update-failure-test-'));
+  try {
+    let calls = 0;
+    const request = (async () => { calls++; throw new Error('offline'); }) as unknown as typeof fetch;
+    const options = { path: join(dir, 'update-check.json'), intervalMs: 1000, request, now: () => 50_000 };
+    assert.equal(await new UpdateChecker('0.1.1', options).check(), undefined);
+    assert.equal(await new UpdateChecker('0.1.1', options).check(), undefined);
+    assert.equal(calls, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 test('lists survive process restarts and reload only after TTL or explicit refresh', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'opai-cache-test-'));
   try {
@@ -295,6 +343,48 @@ test('lists survive process restarts and reload only after TTL or explicit refre
     assert.deepEqual(await cache().get('query:5', load), [{ id: '4', name: 'version 4' }]);
     assert.deepEqual(await new ListCache('other-account', 8 * 60 * 60 * 1000, isSavedQueryList, dir, () => now).get('mine', load), [{ id: '5', name: 'version 5' }]);
     assert.equal(calls, 5);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('newly observed assigned tickets move to the top while known tickets keep their order', () => {
+  const ticket = (id: string, title = `Ticket ${id}`) => ({ id, provider: 'openproject@main', title, type: 'Bug' as const, typeLabel: 'Bug', status: 'New' });
+  const previous = [ticket('8'), ticket('5'), ticket('3')];
+  const fresh = [ticket('5', 'Updated five'), ticket('9'), ticket('3', 'Updated three'), ticket('8', 'Updated eight'), ticket('7')];
+  const ordered = orderAssignedTickets(previous, fresh);
+  assert.deepEqual(ordered.map(item => item.id), ['9', '7', '8', '5', '3']);
+  assert.equal(ordered.find(item => item.id === '5')?.title, 'Updated five');
+  assert.deepEqual(orderAssignedTickets(undefined, fresh), fresh);
+  assert.deepEqual([...newlyAssignedTicketIds(previous, fresh)], ['9', '7']);
+  assert.deepEqual([...newlyAssignedTicketIds(undefined, fresh)], []);
+});
+test('expired lists fall back to stale cache after an automatic refresh failure', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'opai-stale-cache-test-'));
+  try {
+    let now = 100;
+    const cache = new ListCache('instance:user', 10, isSavedQueryList, dir, () => now);
+    await cache.get('queries', async () => [{ id: '1', name: 'Saved' }]);
+    now = 111;
+    const result = await cache.getWithMetadata('queries', async () => { throw new Error('offline'); });
+    assert.deepEqual(result, { value: [{ id: '1', name: 'Saved' }], source: 'stale' });
+    await assert.rejects(cache.getWithMetadata('queries', async () => { throw new Error('offline'); }, true), /offline/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('CLI utility commands work before OpenProject configuration is loaded', async () => {
+  assert.deepEqual(parseCliCommand([]), { kind: 'interactive' });
+  assert.deepEqual(parseCliCommand(['--help']), { kind: 'help' });
+  assert.deepEqual(parseCliCommand(['-v']), { kind: 'version' });
+  assert.deepEqual(parseCliCommand(['show', '42']), { kind: 'show', id: '42' });
+  assert.throws(() => parseCliCommand(['show']), /Ticket ID required/);
+  assert.throws(() => parseCliCommand(['unknown']), /Usage:/);
+  assert.match(cliHelp, /opai init/);
+  assert.match(cliHelp, /opai --version/);
+
+  const dir = await mkdtemp(join(tmpdir(), 'opai-init-test-'));
+  try {
+    const destination = join(dir, 'config.json');
+    await initializeConfig(destination, '{"openproject":{"url":"https://example.com"}}\n');
+    assert.equal(await readFile(destination, 'utf8'), '{"openproject":{"url":"https://example.com"}}\n');
+    assert.equal((await stat(destination)).mode & 0o777, 0o600);
+    await assert.rejects(initializeConfig(destination, '{}'), /already exists/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('dashboard uses stale cache without fetching and renders all local quest stats', async () => {
@@ -376,6 +466,7 @@ test('ticket rows show ID, title, type, status, and priority without overflowing
   assert.match(row, /In progress/);
   assert.match(row, /High/);
   assert.match(row, /…/);
+  assert.match(unstyled(ticketRow(ticket, 80, true)), /#4521\s+●\s+/);
 });
 test('ticket rows align type, status, and priority columns', () => {
   const bug = unstyled(ticketRow({ id: '5', provider: 'openproject@main', title: 'Short', type: 'Bug', typeLabel: 'Bug', status: 'New', priority: { id: '3', name: 'High' } }, 80));
@@ -524,19 +615,35 @@ test('OPAI uses its Catppuccin Mocha RGB palette independently of ANSI theme col
   assert.equal(palette.muted('x'), '\u001b[38;2;88;91;112mx\u001b[0m');
   assert.equal(createOpaiPalette(false).accent('x'), 'x');
 });
-test('Escape returns from a prompt without treating Ctrl+C as Back', async () => {
+test('Escape and Left Arrow return from menus while Backspace remains a text-editing key', async () => {
+  assert.equal(isQuickBackKey({ name: 'left' }), true);
+  assert.equal(isQuickBackKey({ name: 'backspace' }), false);
+  assert.equal(isQuickBackKey({ name: 'c', ctrl: true }), false);
+  for (const name of ['escape', 'left']) {
+    const input = new EventEmitter();
+    const prompt = promptWithBack<string>(signal => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortPromptError' })));
+    }), input);
+    input.emit('keypress', '', { name });
+    assert.equal(await prompt, BACK);
+    assert.equal(input.listenerCount('keypress'), 0);
+  }
   const input = new EventEmitter();
-  const prompt = promptWithBack<string>(signal => new Promise((_, reject) => {
-    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortPromptError' })));
-  }), input);
-  input.emit('keypress', '\u001b', { name: 'escape' });
-  assert.equal(await prompt, BACK);
-  assert.equal(input.listenerCount('keypress'), 0);
   const second = await promptWithBack(async () => {
     input.emit('keypress', '\u0003', { name: 'c', ctrl: true });
     return 'still here';
   }, input);
   assert.equal(second, 'still here');
+  const editing = await promptWithBack(async () => {
+    input.emit('keypress', '', { name: 'backspace' });
+    return 'editing continues';
+  }, input);
+  assert.equal(editing, 'editing continues');
+  const movingCursor = await promptWithBack(async () => {
+    input.emit('keypress', '', { name: 'left' });
+    return 'cursor moves';
+  }, input, { quickBack: false });
+  assert.equal(movingCursor, 'cursor moves');
 });
 test('API token persists with owner-only permissions and environment override', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'opai-token-test-'));
