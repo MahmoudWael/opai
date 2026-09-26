@@ -1,6 +1,7 @@
 import { ticketKey, type Ticket, type TicketProvider } from '../providers/types.js';
 import { SessionStore } from './store.js';
 
+/** Refreshes ticket snapshots in saved sessions and reports unavailable tickets. */
 export async function syncSessionTickets(store: SessionStore, provider: Pick<TicketProvider, 'identity' | 'get'>, tickets: Ticket[], includeMissing = false): Promise<{ updated: number; unavailable: string[] }> {
   let updated = await store.syncTickets(tickets);
   const unavailable: string[] = [];

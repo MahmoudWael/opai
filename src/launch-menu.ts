@@ -7,6 +7,7 @@ export interface LaunchMenuChoice {
   value: LaunchAction;
 }
 
+/** Builds Inquirer settings for editing a prompt template in place. */
 export function editablePromptConfig(message: string, current: string): {
   message: string;
   default: string;
@@ -17,19 +18,23 @@ export function editablePromptConfig(message: string, current: string): {
     message,
     default: current,
     prefill: 'editable',
+    /** Requires the editable prompt to retain its ticket placeholder. */
     validate: value => value.includes('{{id}}') || 'Prompt template must contain {{id}}.'
   };
 }
 
+/** Truncates a launch-menu preview without changing its underlying value. */
 function preview(value: string, max = 52): string {
   const chars = [...value];
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : value;
 }
 
+/** Formats Default distinctly from an explicit selected value. */
 function selectedValue(value: string): string {
   return value === 'Default' ? '(Default)' : value;
 }
 
+/** Summarizes saved model and effort defaults for one agent. */
 export function launchDefaultsSummary(model: string, effort: string): string {
   const defaultModel = model === 'Default';
   const defaultEffort = effort === 'Default';
@@ -39,14 +44,17 @@ export function launchDefaultsSummary(model: string, effort: string): string {
   return `${modelSummary} · ${effortSummary}`;
 }
 
+/** Summarizes whether prompts use provider or custom defaults. */
 export function promptDefaultsSummary(custom: boolean): string {
   return custom ? 'Custom' : 'Provider default';
 }
 
+/** Formats one aligned row in the launch-defaults screen. */
 export function launchDefaultsRow(label: string, summary: string): string {
   return `  ${label.padEnd(18)}  ${summary}`;
 }
 
+/** Renders a centered separator heading for a menu section. */
 export function menuSectionHeader(label: string, width = 48): string {
   const content = ` ${label} `;
   const remaining = Math.max(4, width - [...content].length);
@@ -55,6 +63,7 @@ export function menuSectionHeader(label: string, width = 48): string {
   return `${'─'.repeat(left)}${content}${'─'.repeat(right)}`;
 }
 
+/** Builds the launch-options choices and restores focus to the last edit. */
 export function buildLaunchMenu(
   model: string,
   effort: string,

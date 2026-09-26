@@ -5,14 +5,17 @@ type WorkPackage = { id: number; subject: string; _links: { type?: Link; status?
 type Collection = { total: number; count: number; offset: number; _embedded?: { elements?: WorkPackage[] } };
 type Query = { id: number; name: string; _embedded?: { results?: Collection } };
 type QueryCollection = { total: number; _embedded?: { elements?: Query[] } };
+/** Extracts a numeric resource ID from an OpenProject HAL link. */
 function linkId(link?: Link): number | undefined { const match = link?.href?.match(/\/(\d+)$/); return match ? Number(match[1]) : undefined; }
 export class OpenProjectProvider implements TicketProvider {
   readonly identity: string;
   private readonly base: string;
+  /** Creates a read-only OpenProject API v3 ticket provider. */
   constructor(private readonly config: Config['openproject'], private readonly token: string, private readonly request: typeof fetch = fetch) {
     this.identity = `openproject@${config.instanceId}`;
     this.base = config.url.replace(/\/+$/, '');
   }
+  /** Normalizes an OpenProject work package into the common ticket model. */
   normalize(wp: WorkPackage): Ticket {
     if (!Number.isInteger(wp.id) || !wp.subject || !wp._links) throw new Error('Invalid OpenProject work package response.');
     const typeId = linkId(wp._links.type);
@@ -24,12 +27,14 @@ export class OpenProjectProvider implements TicketProvider {
       : undefined;
     return { id: String(wp.id), provider: this.identity, title: wp.subject, type, typeLabel, status: wp._links.status?.title ?? 'Unknown', priority, url: `${this.base}/work_packages/${wp.id}` };
   }
+  /** Returns and validates the configured prompt template for a ticket kind. */
   promptTemplate(kind: PromptKind): string {
     const configured = this.config.promptTemplates?.[kind];
     const template = configured ?? (kind === 'bug' ? 'fix openproject bug {{id}}' : 'implement openproject user story {{id}}');
     if (typeof template !== 'string' || !template.includes('{{id}}')) throw new Error(`OpenProject ${kind} prompt template must contain {{id}}.`);
     return template;
   }
+  /** Constructs the exact Implement or Fix prompt for a normalized ticket. */
   prompt(ticket: Ticket, action: TicketAction, override?: string): string {
     if (ticket.provider !== this.identity) throw new Error('Ticket belongs to another provider.');
     const kind = action === 'fix' && ticket.type === 'Bug' ? 'bug' : action === 'implement' && ticket.type === 'User Story' ? 'userStory' : undefined;
@@ -38,6 +43,7 @@ export class OpenProjectProvider implements TicketProvider {
     if (typeof template !== 'string' || !template.includes('{{id}}')) throw new Error(`OpenProject ${kind} prompt template must contain {{id}}.`);
     return template.replaceAll('{{id}}', ticket.id);
   }
+  /** Performs an authenticated read-only API request and parses its JSON body. */
   private async getJson<T>(path: string): Promise<T> {
     let response: Response;
     const timeoutSeconds = this.config.requestTimeoutSeconds ?? 15;
@@ -51,6 +57,7 @@ export class OpenProjectProvider implements TicketProvider {
     if (!response.ok) throw new Error(`OpenProject API returned HTTP ${response.status}${response.status === 401 ? ' (check API token)' : ''}.`);
     try { return await response.json() as T; } catch { throw new Error('OpenProject returned invalid JSON.'); }
   }
+  /** Lists all paginated open work packages assigned to the current user. */
   async listAssigned(): Promise<Ticket[]> {
     const user = await this.getJson<{ id: number }>('/api/v3/users/me');
     if (!Number.isInteger(user.id)) throw new Error('OpenProject did not return a user ID.');
@@ -68,6 +75,7 @@ export class OpenProjectProvider implements TicketProvider {
     }
     return result;
   }
+  /** Lists all paginated saved queries visible to the current user. */
   async listSavedQueries(): Promise<SavedQuery[]> {
     const queries: SavedQuery[] = [];
     for (let offset = 1; ; offset++) {
@@ -82,6 +90,7 @@ export class OpenProjectProvider implements TicketProvider {
       if (!elements.length || queries.length >= page.total) return queries;
     }
   }
+  /** Lists all paginated work packages returned by a saved query. */
   async listQueryTickets(queryId: string): Promise<Ticket[]> {
     if (!/^\d+$/.test(queryId)) throw new Error('OpenProject query ID must be numeric.');
     const tickets: Ticket[] = [];
@@ -95,6 +104,7 @@ export class OpenProjectProvider implements TicketProvider {
       if (!elements.length || tickets.length >= results.total) return tickets;
     }
   }
+  /** Retrieves and normalizes one OpenProject work package. */
   async get(id: string): Promise<Ticket> {
     if (!/^\d+$/.test(id)) throw new Error('OpenProject ticket ID must be numeric.');
     return this.normalize(await this.getJson<WorkPackage>(`/api/v3/work_packages/${id}`));

@@ -5,6 +5,7 @@ import { parseConfiguredModels, type ConfiguredModels } from './models.js';
 export const configDir = join(homedir(), '.config', 'opai');
 export interface PromptTemplates { bug?: string; userStory?: string }
 export interface Config { openproject: { url: string; instanceId: string; bugTypeId: number; userStoryTypeId: number; requestTimeoutSeconds?: number; promptTemplates?: PromptTemplates }; cacheTtlHours?: number; updateCheckDays?: number; defaultAgent?: 'claude' | 'codex'; cwd?: string; agents?: { claude?: string; codex?: string }; models?: ConfiguredModels }
+/** Parses and validates configured ticket prompt templates. */
 export function parsePromptTemplates(value: unknown): PromptTemplates | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('openproject.promptTemplates must be an object.');
@@ -18,12 +19,14 @@ export function parsePromptTemplates(value: unknown): PromptTemplates | undefine
   }
   return result;
 }
+/** Loads, parses, and validates OPAI's JSON configuration file. */
 export async function loadConfig(): Promise<Config> {
   let raw: unknown;
   try { raw = JSON.parse(await readFile(join(configDir, 'config.json'), 'utf8')); }
   catch { throw new Error(`Run opai init to create ${join(configDir, 'config.json')}, then add your OpenProject settings.`); }
   return parseConfig(raw);
 }
+/** Validates an unknown value as a complete OPAI configuration. */
 export function parseConfig(raw: unknown): Config {
   const c = raw as Partial<Config>;
   if (!c.openproject?.url || !c.openproject.instanceId || !Number.isInteger(c.openproject.bugTypeId) || !Number.isInteger(c.openproject.userStoryTypeId)) throw new Error('Config needs openproject.url, instanceId, bugTypeId, and userStoryTypeId. See config.example.json.');

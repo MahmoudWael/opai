@@ -6,14 +6,17 @@ export interface ModelOption { name: string; value: ModelPreference }
 
 const CLAUDE_ALIASES = ['sonnet', 'opus', 'haiku'];
 
+/** Reports whether a value is a safe agent model identifier. */
 export function isModelId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]{0,199}$/.test(value);
 }
 
+/** Throws when a configured model identifier is malformed. */
 function validateModelId(agent: Agent, value: string): void {
   if (!isModelId(value)) throw new Error(`Invalid ${agent} model ID: ${JSON.stringify(value)}.`);
 }
 
+/** Parses per-agent custom model identifiers from configuration. */
 export function parseConfiguredModels(value: unknown): ConfiguredModels | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('models must be an object.');
@@ -30,6 +33,7 @@ export function parseConfiguredModels(value: unknown): ConfiguredModels | undefi
   };
 }
 
+/** Builds selectable model options for an agent, including Default. */
 export function modelOptions(agent: Agent, configured: string[] = []): ModelOption[] {
   for (const model of configured) validateModelId(agent, model);
   const models = agent === 'claude' ? [...CLAUDE_ALIASES, ...configured] : configured;
@@ -40,6 +44,7 @@ export function modelOptions(agent: Agent, configured: string[] = []): ModelOpti
   ];
 }
 
+/** Validates a saved model preference against the agent's available options. */
 export function resolvePreferredModel(agent: Agent, preference: ModelPreference, configured: string[] = []): ModelPreference {
   if (preference === null) return null;
   validateModelId(agent, preference);
@@ -49,6 +54,7 @@ export function resolvePreferredModel(agent: Agent, preference: ModelPreference,
   return preference;
 }
 
+/** Returns the human-readable label for a model preference. */
 export function modelLabel(model: ModelPreference): string {
   return model === null ? 'Default' : model;
 }

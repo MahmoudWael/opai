@@ -500,12 +500,12 @@ test('selected ticket fills one row without clipping status, and sessions show r
   assert.equal(unstyled(row).indexOf('[Developed]'), unstyled(other).indexOf('[New]'));
 });
 test('header keeps the full mascot and aligns all adjacent information', () => {
-  const header = renderHeader('#4521 A ticket title that is much too long for this terminal', 'Bug · In progress · Priority: High', { kind: 'success', message: 'Ready' }, 58, 'idle');
+  const header = renderHeader('#4521 A ticket title that is much too long for this terminal', 'Bug · In progress · Priority: High', { kind: 'success', message: 'Ready' }, 58, 'rabbit');
   const lines = header.split('\n');
   assert.equal(lines.length, 3);
-  assert.match(lines[0], /\/\\_\/\\/);
-  assert.match(lines[1], /\(˶ᵔ ᵕ ᵔ˶\)✧/);
-  assert.match(lines[2], /\/\|☆\|\\/);
+  assert.match(lines[0], /\/\) \/\)/);
+  assert.match(lines[1], /\(˶ᵔ ᵕ ᵔ˶\)/);
+  assert.match(lines[2], /\/づ♡づ/);
   assert.ok(lines.every(line => visibleWidth(line) <= 58));
   const contentColumns = [
     visibleWidth(lines[0].slice(0, lines[0].indexOf('OPAI'))),
@@ -515,9 +515,12 @@ test('header keeps the full mascot and aligns all adjacent information', () => {
   assert.deepEqual(contentColumns, [contentColumns[0], contentColumns[0], contentColumns[0]]);
   assert.match(lines[0], /…$/);
 });
-test('rabbit launches use the rabbit goodbye art', () => {
-  assert.match(renderGoodbye('rabbit'), /₍ᐢ\.\.ᐢ₎♡/);
-  assert.doesNotMatch(renderGoodbye('idle'), /₍ᐢ\.\.ᐢ₎♡/);
+test('goodbye uses one compact mascot while keeping the farewell details', () => {
+  const goodbye = renderGoodbye('rabbit');
+  assert.equal(goodbye.split('\n').length, 2);
+  assert.match(goodbye, /₍ᐢ\.\.ᐢ₎♡.*See you next quest, adventurer!/);
+  assert.match(goodbye, /Your saved sessions will be here when you return\./);
+  assert.doesNotMatch(goodbye, /\/\\_\/\\/);
 });
 test('header mascot changes by activity without changing content indentation', () => {
   const claude = renderHeader('Start session', 'Claude Code', { kind: 'idle', message: 'Ready' }, 72, 'claude').split('\n');
@@ -578,13 +581,15 @@ test('prompt editing starts with the current template as editable text', () => {
   assert.match(String(config.validate('missing placeholder')), /must contain \{\{id\}\}/);
 });
 test('every activity mascot keeps a cheerful expression', () => {
-  for (const mood of ['idle', 'rabbit', 'chick', 'claude', 'codex', 'resume', 'loading', 'success', 'error'] as const) {
-    const face = renderHeader('Quest', mood, { kind: mood === 'error' ? 'error' : 'idle', message: 'Ready' }, 72, mood).split('\n')[1]!;
+  for (const mood of ['rabbit', 'chick', 'claude', 'codex', 'resume', 'loading', 'success', 'error'] as const) {
+    const header = renderHeader('Quest', mood, { kind: mood === 'error' ? 'error' : 'idle', message: 'Ready' }, 72, mood);
+    const face = header.split('\n')[1]!;
     assert.match(face, /[ᴗᵔᵕω⩊ᴥө]/, `${mood} mascot should look cheerful`);
     assert.doesNotMatch(face, /[_︿]/, `${mood} mascot should not look upset`);
+    assert.doesNotMatch(header, /\/\\_\/\\/, `${mood} should not use the cat mascot`);
   }
 });
-test('home mascot rotates across process launches and becomes the neutral screen default', async () => {
+test('home mascot rotates between the rabbit and chick', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'opai-mascot-rotation-test-'));
   try {
     const path = join(dir, 'ui-state.json');
@@ -592,12 +597,12 @@ test('home mascot rotates across process launches and becomes the neutral screen
     const second = await new MascotRotationStore(path).next();
     const third = await new MascotRotationStore(path).next();
     const fourth = await new MascotRotationStore(path).next();
-    assert.deepEqual([first, second, third, fourth], ['rabbit', 'chick', 'idle', 'rabbit']);
-    assert.equal(new Set([first, second, third]).size, 3);
+    assert.deepEqual([first, second, third, fourth], ['rabbit', 'chick', 'rabbit', 'chick']);
+    assert.equal(new Set([first, second, third]).size, 2);
     setIdleMascotMood(second);
     assert.match(renderHeader('Home', 'Browse tickets', { kind: 'idle', message: 'Ready' }, 80), /ө/);
   } finally {
-    setIdleMascotMood('idle');
+    setIdleMascotMood('rabbit');
     await rm(dir, { recursive: true, force: true });
   }
 });

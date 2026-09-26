@@ -5,6 +5,7 @@ import { configDir } from './config.js';
 
 export const tokenPath = join(configDir, 'token');
 
+/** Loads the API token from the environment or the private token file. */
 export async function loadApiToken(path = tokenPath, environment = process.env.OPENPROJECT_API_TOKEN): Promise<string | undefined> {
   if (environment?.trim()) return environment.trim();
   try {
@@ -16,6 +17,7 @@ export async function loadApiToken(path = tokenPath, environment = process.env.O
   }
 }
 
+/** Atomically saves a non-empty API token with owner-only permissions. */
 export async function saveApiToken(token: string, path = tokenPath): Promise<void> {
   if (!token.trim()) throw new Error('API token cannot be empty.');
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

@@ -24,11 +24,13 @@ interface UpdateCheckerOptions {
 
 const registryUrl = 'https://registry.npmjs.org/%40mahmoudwael%2Fopai/latest';
 
+/** Parses a stable semantic version into numeric components. */
 function stableVersion(value: string): number[] | undefined {
   const match = value.match(/^(\d+)\.(\d+)\.(\d+)$/);
   return match ? match.slice(1).map(Number) : undefined;
 }
 
+/** Reports whether one stable semantic version is newer than another. */
 export function isNewerVersion(latest: string, current: string): boolean {
   const left = stableVersion(latest);
   const right = stableVersion(current);
@@ -47,6 +49,7 @@ export class UpdateChecker {
   private readonly now: () => number;
   private readonly timeoutMs: number;
 
+  /** Creates a cached npm update checker with injectable I/O for tests. */
   constructor(private readonly currentVersion: string, options: UpdateCheckerOptions = {}) {
     this.path = options.path ?? join(configDir, 'update-check.json');
     this.intervalMs = options.intervalMs ?? 7 * 86_400_000;
@@ -56,6 +59,7 @@ export class UpdateChecker {
     if (!Number.isFinite(this.intervalMs) || this.intervalMs <= 0) throw new Error('Update-check interval must be positive.');
   }
 
+  /** Reads and validates cached update-check state. */
   private async read(): Promise<UpdateState | undefined> {
     try {
       const value = JSON.parse(await readFile(this.path, 'utf8')) as Partial<UpdateState>;
@@ -64,6 +68,7 @@ export class UpdateChecker {
     return undefined;
   }
 
+  /** Atomically persists update-check state. */
   private async write(value: UpdateState): Promise<void> {
     const root = dirname(this.path);
     await mkdir(root, { recursive: true, mode: 0o700 });
@@ -72,12 +77,14 @@ export class UpdateChecker {
     await rename(temp, this.path);
   }
 
+  /** Builds an update notice when cached state contains a newer version. */
   private notice(state: UpdateState | undefined): UpdateNotice | undefined {
     return state?.latestVersion && isNewerVersion(state.latestVersion, this.currentVersion)
       ? { currentVersion: this.currentVersion, latestVersion: state.latestVersion }
       : undefined;
   }
 
+  /** Checks npm when due and otherwise reuses the cached update result. */
   async check(): Promise<UpdateNotice | undefined> {
     const previous = await this.read();
     const now = this.now();

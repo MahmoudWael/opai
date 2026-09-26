@@ -6,11 +6,19 @@ const spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 
 export class StatusBar {
   current: Status = { kind: 'idle', message: 'Ready for your next quest' };
-  constructor(private readonly output: { write(chunk: string): unknown; isTTY?: boolean } = process.stdout) {}
+  /** Creates a status bar that writes to a terminal-like output stream. */
+  constructor(private readonly output: {
+    /** Writes one status-bar output chunk. */
+    write(chunk: string): unknown;
+    isTTY?: boolean;
+  } = process.stdout) {}
+  /** Replaces the current status shown by subsequent screens. */
   set(kind: StatusKind, message: string): void { this.current = { kind, message }; }
+  /** Runs asynchronous work with an animated loading state and final status. */
   async run<T>(label: string, work: () => Promise<T>, success: (value: T) => string): Promise<T> {
     this.set('loading', label);
     let frame = 0;
+    /** Draws one frame of the inline loading animation. */
     const draw = () => {
       this.output.write(`\r\u001b[2K  ${faces[frame % faces.length]}  ${spinners[frame % spinners.length]} ${label}`);
       frame++;

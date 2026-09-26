@@ -6,8 +6,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Returns Claude Code's native project-session directory. */
 const defaultRoot = () => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects');
 export interface NativeSessionCandidate { agent: 'claude' | 'codex'; sessionId: string; cwd: string; createdAt: string }
+/** Lists Claude JSONL session files below the configured projects directory. */
 async function projectFiles(root: string): Promise<string[]> {
   let projects;
   try { projects = await readdir(root, { withFileTypes: true }); } catch { return []; }
@@ -18,10 +20,12 @@ async function projectFiles(root: string): Promise<string[]> {
   }));
   return groups.flat();
 }
+/** Checks whether a native Claude session with the supplied UUID exists. */
 export async function nativeClaudeSessionExists(id: string, root = defaultRoot()): Promise<boolean> {
   if (!UUID.test(id)) return false;
   return (await projectFiles(root)).some(path => path.endsWith(`/${id}.jsonl`));
 }
+/** Reads the first user prompt and identifying metadata from a Claude session. */
 async function firstPrompt(path: string): Promise<{ prompt: string; sessionId: string; cwd: string; createdAt: string } | undefined> {
   const stream = createReadStream(path, { encoding: 'utf8' });
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
@@ -40,6 +44,7 @@ async function firstPrompt(path: string): Promise<{ prompt: string; sessionId: s
   } finally { lines.close(); stream.destroy(); }
   return undefined;
 }
+/** Finds native Claude sessions whose first prompt exactly matches a ticket prompt. */
 export async function findClaudeTicketSessions(prompt: string, root = defaultRoot()): Promise<NativeSessionCandidate[]> {
   const files = await projectFiles(root);
   const candidates = await Promise.all(files.map(async path => {
@@ -50,5 +55,7 @@ export async function findClaudeTicketSessions(prompt: string, root = defaultRoo
   }));
   return candidates.filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined);
 }
+/** Builds an interactive Claude launch specification with optional model settings. */
 export function claudeLaunch(executable: string, cwd: string, prompt: string, id: string, model: string | null = null, effort: string | null = null): LaunchSpec { return { executable, cwd, args: ['--session-id', id, ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), prompt] }; }
+/** Builds a launch specification that resumes an exact native Claude session. */
 export function claudeResume(executable: string, cwd: string, id: string): LaunchSpec { return { executable, cwd, args: ['--resume', id] }; }

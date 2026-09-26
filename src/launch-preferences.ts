@@ -12,23 +12,28 @@ export interface LaunchPreferences {
   prompts: Record<string, Partial<Record<PromptKind, string>>>;
 }
 
+/** Creates default launch preferences for every supported agent. */
 function emptyPreferences(): LaunchPreferences {
   return { agents: { claude: { model: null, effort: null }, codex: { model: null, effort: null } }, prompts: {} };
 }
 
+/** Parses an optional model or effort identifier. */
 function optionalId(value: unknown, label: string): string | null {
   if (value === undefined || value === null) return null;
   if (!isModelId(value)) throw new Error(`Invalid ${label}: ${JSON.stringify(value)}.`);
   return value;
 }
 
+/** Validates that a prompt template contains the ticket placeholder. */
 function validateTemplate(value: unknown): string {
   if (typeof value !== 'string' || !value.includes('{{id}}')) throw new Error('Prompt template must contain {{id}}.');
   return value;
 }
 
 export class LaunchPreferenceStore {
+  /** Creates a launch-preference store backed by the supplied JSON file. */
   constructor(readonly path = join(configDir, 'launch-preferences.json')) {}
+  /** Loads and validates all launch preferences with backward-compatible defaults. */
   async all(): Promise<LaunchPreferences> {
     let raw: unknown;
     try { raw = JSON.parse(await readFile(this.path, 'utf8')); }
@@ -56,12 +61,14 @@ export class LaunchPreferenceStore {
     }
     return { agents, prompts };
   }
+  /** Atomically persists launch preferences. */
   private async save(value: LaunchPreferences): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const temp = `${this.path}.${randomUUID()}.tmp`;
     await writeFile(temp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     await rename(temp, this.path);
   }
+  /** Saves the preferred model and effort for one agent. */
   async setAgent(agent: Agent, defaults: AgentLaunchDefaults): Promise<void> {
     const value = await this.all();
     value.agents[agent] = {
@@ -70,6 +77,7 @@ export class LaunchPreferenceStore {
     };
     await this.save(value);
   }
+  /** Saves or clears a provider-specific prompt template. */
   async setPrompt(provider: string, kind: PromptKind, template: string | null): Promise<void> {
     const value = await this.all();
     if (template === null) {

@@ -4,12 +4,13 @@ import { dirname, join } from 'node:path';
 import { configDir } from './config.js';
 import type { IdleMascotMood } from './ui.js';
 
-const rotation: readonly IdleMascotMood[] = ['rabbit', 'chick', 'idle'];
+const rotation: readonly IdleMascotMood[] = ['rabbit', 'chick'];
 
 interface UiState {
   nextMascotIndex: number;
 }
 
+/** Normalizes persisted mascot state to a valid rotation index. */
 function nextIndex(value: unknown): number {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
   const index = (value as Partial<UiState>).nextMascotIndex;
@@ -17,8 +18,10 @@ function nextIndex(value: unknown): number {
 }
 
 export class MascotRotationStore {
+  /** Creates a mascot rotation store backed by the supplied JSON file. */
   constructor(readonly path = join(configDir, 'ui-state.json')) {}
 
+  /** Returns the next mascot and atomically advances the persisted rotation. */
   async next(): Promise<IdleMascotMood> {
     let index = 0;
     try { index = nextIndex(JSON.parse(await readFile(this.path, 'utf8'))); }

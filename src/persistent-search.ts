@@ -18,9 +18,13 @@ import { isQuickBackKey } from './back.js';
 type SearchTheme = {
   icon: { cursor: string };
   style: {
+    /** Styles disabled choices. */
     disabled: (text: string) => string;
+    /** Styles the active search term. */
     searchTerm: (text: string) => string;
+    /** Styles choice descriptions. */
     description: (text: string) => string;
+    /** Formats the prompt's keyboard help. */
     keysHelpTip: (keys: [key: string, action: string][]) => string | undefined;
   };
   helpMode: 'always' | 'never' | 'auto';
@@ -38,11 +42,14 @@ type NormalizedChoice<Value> = Required<Pick<SearchChoice<Value>, 'value' | 'nam
 
 export type PersistentSearchConfig<Value> = {
   message: string;
+  /** Produces filtered choices for the current search term. */
   source: (term: string | undefined, options: { signal: AbortSignal }) => readonly (SearchChoice<Value> | Separator)[] | Promise<readonly (SearchChoice<Value> | Separator)[]>;
+  /** Validates the selected value before completing the prompt. */
   validate?: (value: Value) => boolean | string | Promise<boolean | string>;
   pageSize?: number;
   initialTerm?: string;
   defaultValue?: Value;
+  /** Compares a choice with the preferred initial selection. */
   equal?: (left: Value, right: Value) => boolean;
   backValue?: Value;
   instructions?: { navigation: string; pager: string };
@@ -52,18 +59,24 @@ export type PersistentSearchConfig<Value> = {
 const baseTheme: SearchTheme = {
   icon: { cursor: '❯' },
   style: {
+    /** Prefixes disabled choices with a dash. */
     disabled: text => `- ${text}`,
+    /** Leaves search text unchanged by default. */
     searchTerm: text => text,
+    /** Leaves descriptions unchanged by default. */
     description: text => text,
+    /** Joins key-action pairs into one help line. */
     keysHelpTip: keys => keys.map(([key, action]) => `${key} ${action}`).join(' · ')
   },
   helpMode: 'always'
 };
 
+/** Reports whether a normalized search item can receive selection focus. */
 function selectable<Value>(item: NormalizedChoice<Value> | Separator): item is NormalizedChoice<Value> {
   return !Separator.isSeparator(item) && !item.disabled;
 }
 
+/** Fills optional choice fields while preserving separators. */
 function normalize<Value>(choices: readonly (SearchChoice<Value> | Separator)[]): (NormalizedChoice<Value> | Separator)[] {
   return choices.map(choice => {
     if (Separator.isSeparator(choice)) return choice;
@@ -72,6 +85,7 @@ function normalize<Value>(choices: readonly (SearchChoice<Value> | Separator)[])
   });
 }
 
+/** Runs a searchable prompt that preserves filter text and selection state. */
 export const persistentSearch = createPrompt(<Value>(config: PersistentSearchConfig<Value>, done: (value: Value) => void) => {
   const { pageSize = 7, validate = () => true } = config;
   const theme = makeTheme(baseTheme, config.theme as never);
@@ -143,6 +157,7 @@ export const persistentSearch = createPrompt(<Value>(config: PersistentSearchCon
     active,
     pageSize,
     loop: false,
+    /** Renders one separator, disabled choice, or selectable result. */
     renderItem({ item, isActive }) {
       if (Separator.isSeparator(item)) return ` ${item.separator}`;
       if (item.disabled) return theme.style.disabled(`${item.name} ${typeof item.disabled === 'string' ? item.disabled : '(disabled)'}`);

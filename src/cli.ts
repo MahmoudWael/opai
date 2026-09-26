@@ -27,16 +27,35 @@ import { cliHelp, initializeConfig, packageVersion, parseCliCommand } from './co
 import { persistentSearch } from './persistent-search.js';
 import { join } from 'node:path';
 import { UpdateChecker } from './update-check.js';
+/** Reports whether an error represents an interrupted Inquirer prompt. */
 function aborted(error: unknown): boolean { return error instanceof Error && error.name === 'ExitPromptError'; }
 class ExitToTerminal extends Error {}
 let showGoodbye = true;
-const menuTheme = { icon: { cursor: selectionCursor() }, style: { highlight: accent, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · ← back` } };
-const listTheme = { ...menuTheme, style: { ...menuTheme.style, highlight: listHighlight, keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · ← back` } };
+const menuTheme = {
+  icon: { cursor: selectionCursor() },
+  style: {
+    highlight: accent,
+    /** Formats keyboard help for standard menus. */
+    keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · ← back`
+  }
+};
+const listTheme = {
+  ...menuTheme,
+  style: {
+    ...menuTheme.style,
+    highlight: listHighlight,
+    /** Formats keyboard help for full-row highlighted lists. */
+    keysHelpTip: (keys: [key: string, action: string][]) => `${keys.map(([key, action]) => `${key} ${action}`).join(' · ')} · ← back`
+  }
+};
+/** Reports whether a path exists and refers to a directory. */
 async function directoryExists(path: string): Promise<boolean> { try { return (await stat(path)).isDirectory(); } catch { return false; } }
+/** Checks whether a recorded session still exists in its native agent store. */
 async function nativeExists(session: Session): Promise<boolean> {
   if (session.agent === 'codex') return nativeCodexSessionExists(session.sessionId);
   return nativeClaudeSessionExists(session.sessionId);
 }
+/** Runs the selected CLI command or the primary interactive application loop. */
 async function main(): Promise<void> {
   const command = parseCliCommand(process.argv.slice(2));
   if (command.kind === 'help') { showGoodbye = false; console.log(cliHelp); return; }
@@ -70,6 +89,7 @@ async function main(): Promise<void> {
   let newAssignedIds = new Set<string>();
   const ticketCache = new ListCache<Ticket[]>(namespace, cacheTtlMs, isTicketList);
   const queryCache = new ListCache<SavedQuery[]>(namespace, cacheTtlMs, isSavedQueryList);
+  /** Loads a list through its cache while updating the shared status bar. */
   async function cachedList<T extends unknown[]>(cache: ListCache<T>, key: string, load: () => Promise<T>, label: string, noun: string, refresh = false): Promise<T> {
     const result = await cache.getWithMetadata(key, () => {
       return statusBar.run(`Loading ${label}`, load, items => `${items.length} ${noun} loaded`);
@@ -78,6 +98,7 @@ async function main(): Promise<void> {
     else if (result.source !== 'network') statusBar.set('cached', `${result.value.length} ${noun} from cache`);
     return result.value;
   }
+  /** Loads tickets through the cache and synchronizes saved ticket snapshots. */
   async function cachedTickets(key: string, load: () => Promise<Ticket[]>, label: string, refresh = false, includeMissing = false): Promise<Ticket[]> {
     let unavailable: string[] = [];
     const tickets = await cachedList(ticketCache, key, async () => {
@@ -97,10 +118,15 @@ async function main(): Promise<void> {
   const executables = { claude: config.agents?.claude ?? 'claude', codex: config.agents?.codex ?? 'codex' };
   const configuredModels: Record<Agent, string[]> = { claude: config.models?.claude ?? [], codex: config.models?.codex ?? [] };
   const capabilityCache: Partial<Record<Agent, Promise<AgentCapabilities>>> = {};
+  /** Returns an agent's user-facing name. */
   const agentName = (agent: Agent) => agent === 'claude' ? 'Claude Code' : 'Codex';
+  /** Maps a normalized ticket to its configurable prompt kind. */
   const promptKind = (ticket: Ticket): PromptKind => ticket.type === 'Bug' ? 'bug' : 'userStory';
+  /** Maps a normalized ticket to its supported launch action. */
   const ticketAction = (ticket: Ticket) => ticket.type === 'Bug' ? 'fix' as const : 'implement' as const;
+  /** Formats an optional reasoning effort for display. */
   const effortLabel = (effort: string | null) => effort === null ? 'Default' : effort[0]!.toUpperCase() + effort.slice(1);
+  /** Shows post-agent status and lets the user return or exit. */
   async function afterAgentClosed(detail: string, failed = false): Promise<void> {
     agentClosedScreen(detail, failed ? 'error' : 'success');
     const [returnLabel, exitLabel, message] = centeredMenuChoices(['↩  Return to OPAI', '×  Exit to terminal', 'What next?']);
@@ -115,21 +141,25 @@ async function main(): Promise<void> {
     }, { signal }));
     if (choice === 'exit') throw new ExitToTerminal();
   }
+  /** Returns cached launch capabilities for an agent. */
   async function capabilities(agent: Agent): Promise<AgentCapabilities> {
     capabilityCache[agent] ??= discoverAgentCapabilities(agent, executables[agent], configuredModels[agent]);
     return capabilityCache[agent]!;
   }
+  /** Formats a model preference using discovered display metadata. */
   function modelDisplay(model: ModelPreference, caps?: AgentCapabilities): string {
     if (model === null) return 'Default';
     const found = caps?.models.find(item => item.id === model);
     return found && found.label !== found.id ? `${found.label} · ${found.id}` : found?.label ?? model;
   }
+  /** Prompts for a model while preserving the current selection. */
   async function selectModel(agent: Agent, current: ModelPreference, caps: AgentCapabilities): Promise<ModelPreference | typeof BACK> {
     return promptWithBack(signal => select<ModelPreference>({ message: `${agentName(agent)} model`, pageSize: 12, theme: menuTheme, default: current, choices: [
       { name: `${muted('◇  Default')}${current === null ? good(' · current') : ''}`, value: null },
       ...caps.models.map(model => ({ name: `${accent('◈')}  ${bold(modelDisplay(model.id, caps))}${model.id === current ? good(' · current') : ''}`, value: model.id }))
     ] }, { signal }));
   }
+  /** Prompts for a model-compatible effort while preserving the current selection. */
   async function selectEffort(agent: Agent, current: string | null, model: ModelPreference, caps: AgentCapabilities): Promise<string | null | typeof BACK> {
     const efforts = availableEfforts(caps, model);
     const agentDefault = model === null ? undefined : caps.models.find(item => item.id === model)?.defaultEffort;
@@ -139,6 +169,7 @@ async function main(): Promise<void> {
     ] }, { signal }));
   }
   interface LaunchSelection { model: ModelPreference; effort: string | null; template: string }
+  /** Collects and validates per-session model, effort, and prompt choices. */
   async function launchOptions(ticket: Ticket, agent: Agent): Promise<LaunchSelection | undefined> {
     const caps = await capabilities(agent);
     const preferences = await launchPreferences.all();
@@ -195,6 +226,7 @@ async function main(): Promise<void> {
       }
     }
   }
+  /** Launches an agent and records only a verified native session identifier. */
   async function launch(ticket: Ticket, agent: Agent, selection: LaunchSelection): Promise<void> {
     const prompt = provider.prompt(ticket, ticketAction(ticket), selection.template);
     const { model, effort } = selection;
@@ -203,6 +235,7 @@ async function main(): Promise<void> {
     const started = new Date().toISOString();
     const spec = agent === 'claude' ? claudeLaunch(executables.claude, cwd, prompt, id!, model, effort) : codexLaunch(executables.codex, cwd, prompt, model, effort);
     let savedId: string | undefined;
+    /** Captures and stores the native session once it becomes verifiable. */
     const record = async () => {
       if (savedId) return;
       const sessionId = agent === 'claude' ? id : await identifyCodexSession(before!, await codexSessionFiles(), cwd, prompt);
@@ -219,6 +252,7 @@ async function main(): Promise<void> {
     const detail = exitedUnexpectedly ? `${saved} · exited with code ${code}` : saved;
     await afterAgentClosed(detail, exitedUnexpectedly || !savedId);
   }
+  /** Edits saved model and effort defaults for one agent. */
   async function agentDefaultsMenu(agent: Agent): Promise<void> {
     const caps = await capabilities(agent);
     let focusedOption: 'model' | 'effort' = 'model';
@@ -246,6 +280,7 @@ async function main(): Promise<void> {
       statusBar.set('success', `${agentName(agent)} defaults saved`);
     }
   }
+  /** Edits or resets one ticket-kind prompt default. */
   async function promptDefaultsMenu(kind: PromptKind): Promise<void> {
     while (true) {
       const preferences = await launchPreferences.all();
@@ -267,6 +302,7 @@ async function main(): Promise<void> {
       statusBar.set('success', `${label} prompt default saved`);
     }
   }
+  /** Displays the top-level model, effort, and prompt defaults menu. */
   async function launchDefaultsMenu(): Promise<void> {
     while (true) {
       const preferences = await launchPreferences.all();
@@ -285,6 +321,7 @@ async function main(): Promise<void> {
       else await promptDefaultsMenu(choice as PromptKind);
     }
   }
+  /** Finds an unrecorded native session by exact initial ticket prompt. */
   async function recover(ticket: Ticket): Promise<void> {
     const kind = promptKind(ticket);
     const preferences = await launchPreferences.all();
@@ -304,6 +341,7 @@ async function main(): Promise<void> {
     await store.add(ticketKey(ticket), { ...candidate, lastUsedAt: candidate.createdAt, ticket });
     console.log(`Recorded ${candidate.agent} session ${candidate.sessionId} for #${ticket.id}.`);
   }
+  /** Selects and resumes an exact saved native session for a ticket key. */
   async function resumeForKey(key: string, title: string, confirmSingle = false): Promise<boolean> {
     const sessions = await store.list(key);
     if (!sessions.length) { console.log('No session recorded for this ticket.'); return false; }
@@ -325,6 +363,7 @@ async function main(): Promise<void> {
     await afterAgentClosed(detail, exitedUnexpectedly);
     return true;
   }
+  /** Displays available launch, recovery, and resume actions for a ticket. */
   async function ticketMenu(ticket: Ticket): Promise<void> {
     while (true) {
       screen(`#${ticket.id}  ${ticket.title}`, `${ticket.typeLabel} · ${ticket.status} · Priority: ${ticket.priority?.name ?? 'unavailable'}${ticket.url ? ` · ${ticket.url}` : ''}`);
@@ -362,6 +401,7 @@ async function main(): Promise<void> {
       return;
     }
   }
+  /** Browses a searchable cached ticket list with explicit refresh support. */
   async function browseTickets(key: string, label: string, load: () => Promise<Ticket[]>): Promise<void> {
     const refreshChoice = Symbol('refresh');
     let tickets = await cachedTickets(key, load, label);
@@ -372,7 +412,17 @@ async function main(): Promise<void> {
       if (!tickets.length) console.log(`  ${muted('No tickets in this list.')}\n`);
       if (key === assignedTicketsCacheKey && newAssignedIds.size) console.log(`  ${good('● New since your last refresh')}\n`);
       console.log(`  ${hint()} · ${muted('choose ↻ to refresh')}\n`);
-      const selected = await promptWithBack(signal => persistentSearch<Ticket | typeof refreshChoice | typeof BACK>({ message: 'Search by ID or title', pageSize: 13, theme: listTheme, initialTerm: searchTerm, defaultValue: lastSelected, backValue: BACK, equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.id === right.id, source: async term => {
+      const selected = await promptWithBack(signal => persistentSearch<Ticket | typeof refreshChoice | typeof BACK>({
+        message: 'Search by ID or title',
+        pageSize: 13,
+        theme: listTheme,
+        initialTerm: searchTerm,
+        defaultValue: lastSelected,
+        backValue: BACK,
+        /** Compares ticket choices while excluding symbolic menu actions. */
+        equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.id === right.id,
+        /** Filters ticket rows and appends the explicit refresh action. */
+        source: async term => {
         searchTerm = term ?? '';
         const filtered = tickets.filter(ticket => `${ticket.id} ${ticket.title} ${ticket.typeLabel} ${ticket.priority?.name ?? ''}`.toLowerCase().includes((term ?? '').toLowerCase()));
         return [
@@ -380,7 +430,8 @@ async function main(): Promise<void> {
           new Separator(''),
           { name: '↻  Refresh this list', value: refreshChoice, short: 'Refresh this list' }
         ];
-      } }, { signal }), process.stdin, { quickBack: false });
+        }
+      }, { signal }), process.stdin, { quickBack: false });
       if (selected === BACK) return;
       if (selected === refreshChoice) {
         try {
@@ -394,8 +445,10 @@ async function main(): Promise<void> {
       await ticketMenu(selected);
     }
   }
+  /** Displays local actions for one provider saved query. */
   async function queryMenu(query: SavedQuery): Promise<void> {
     const key = `query:${query.id}`;
+    /** Loads the selected query's normalized ticket results. */
     const load = () => provider.listQueryTickets(query.id);
     while (true) {
       screen(query.name, 'Saved query · ticket results load on first open');
@@ -419,6 +472,7 @@ async function main(): Promise<void> {
       }
     }
   }
+  /** Browses searchable saved queries grouped by local preference state. */
   async function savedQueries(): Promise<void> {
     const queries = await cachedList(queryCache, 'saved', () => provider.listSavedQueries(), 'saved queries', 'queries');
     let searchTerm = '';
@@ -427,7 +481,17 @@ async function main(): Promise<void> {
       screen('Saved queries', `${queries.length} quer${queries.length === 1 ? 'y' : 'ies'} · auto refresh after ${config.cacheTtlHours ?? 8}h`);
       console.log(`  ${muted('Type to search · ↑↓ move · Enter select · ← back')}\n`);
       const preferences = await queryPreferences.all();
-      const choice = await promptWithBack(signal => persistentSearch<SavedQuery | typeof BACK>({ message: 'Search saved queries', pageSize: 15, theme: listTheme, initialTerm: searchTerm, defaultValue: lastSelected, backValue: BACK, equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.id === right.id, source: async term => {
+      const choice = await promptWithBack(signal => persistentSearch<SavedQuery | typeof BACK>({
+        message: 'Search saved queries',
+        pageSize: 15,
+        theme: listTheme,
+        initialTerm: searchTerm,
+        defaultValue: lastSelected,
+        backValue: BACK,
+        /** Compares saved-query choices while excluding the Back symbol. */
+        equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.id === right.id,
+        /** Filters and groups saved queries for the search prompt. */
+        source: async term => {
         searchTerm = term ?? '';
         const filtered = queries.filter(query => `${query.id} ${query.name}`.toLowerCase().includes((term ?? '').toLowerCase()));
         return querySections(filtered, preferences, provider.identity).flatMap(section => {
@@ -442,7 +506,8 @@ async function main(): Promise<void> {
             ...section.queries.map(query => ({ name: `${marker}  ${query.name}`, value: query, short: query.name }))
           ];
         });
-      } }, { signal }), process.stdin, { quickBack: false });
+        }
+      }, { signal }), process.stdin, { quickBack: false });
       if (choice === BACK) return;
       const query = choice;
       lastSelected = query;
@@ -450,6 +515,7 @@ async function main(): Promise<void> {
       await queryMenu(query);
     }
   }
+  /** Browses grouped saved sessions without requesting provider ticket lists. */
   async function mySessions(): Promise<void> {
     let searchTerm = '';
     let lastSelectedKey: string | undefined;
@@ -459,11 +525,22 @@ async function main(): Promise<void> {
       if (!groups.length) console.log(`  ${muted('No saved sessions yet. Launch an agent from a ticket first.')}\n`);
       console.log(`  ${muted('Type a ticket ID or title · ← back')}\n`);
       const defaultGroup = groups.find(group => group.key === lastSelectedKey);
-      const choice = await promptWithBack(signal => persistentSearch<(typeof groups)[number] | typeof BACK>({ message: 'Search saved sessions', pageSize: 12, theme: listTheme, initialTerm: searchTerm, defaultValue: defaultGroup, backValue: BACK, equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.key === right.key, source: async term => {
+      const choice = await promptWithBack(signal => persistentSearch<(typeof groups)[number] | typeof BACK>({
+        message: 'Search saved sessions',
+        pageSize: 12,
+        theme: listTheme,
+        initialTerm: searchTerm,
+        defaultValue: defaultGroup,
+        backValue: BACK,
+        /** Compares grouped sessions while excluding the Back symbol. */
+        equal: (left, right) => typeof left !== 'symbol' && typeof right !== 'symbol' && left.key === right.key,
+        /** Filters grouped session rows for the search prompt. */
+        source: async term => {
         searchTerm = term ?? '';
         const filtered = groups.filter(group => `${group.id} ${group.title}`.toLowerCase().includes((term ?? '').toLowerCase()));
         return filtered.map(group => ({ name: sessionRow(group), value: group, short: `#${group.id} ${group.title}` }));
-      } }, { signal }), process.stdin, { quickBack: false });
+        }
+      }, { signal }), process.stdin, { quickBack: false });
       if (choice === BACK) return;
       const group = choice;
       lastSelectedKey = group.key;

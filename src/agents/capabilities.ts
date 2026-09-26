@@ -15,12 +15,14 @@ export interface AgentCapabilities {
   discovered: boolean;
 }
 
+/** Returns the effort levels supported by the selected model or agent. */
 export function availableEfforts(capabilities: AgentCapabilities, model: string | null): string[] {
   const selected = model ? capabilities.models.find(item => item.id === model) : undefined;
   if (selected?.efforts.length) return [...selected.efforts];
   return unique([...capabilities.efforts, ...capabilities.models.flatMap(item => item.efforts)]);
 }
 
+/** Validates and returns a saved effort preference against available choices. */
 export function resolveEffort(effort: string | null, available: string[]): string | null {
   if (effort === null) return null;
   if (!available.includes(effort)) throw new Error(`Saved effort ${JSON.stringify(effort)} is not available for the selected model.`);
@@ -30,8 +32,10 @@ export function resolveEffort(effort: string | null, available: string[]): strin
 const CLAUDE_ALIASES = ['sonnet', 'opus', 'haiku'];
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+/** Removes duplicate strings while preserving their first-seen order. */
 function unique(values: string[]): string[] { return [...new Set(values)]; }
 
+/** Parses Codex's bundled model catalog and appends configured model IDs. */
 export function parseCodexModelCatalog(raw: string, configured: string[] = []): AgentModel[] {
   const value: unknown = JSON.parse(raw);
   if (!value || typeof value !== 'object' || !Array.isArray((value as { models?: unknown }).models)) throw new Error('Codex returned an invalid model catalog.');
@@ -56,6 +60,7 @@ export function parseCodexModelCatalog(raw: string, configured: string[] = []): 
   return models;
 }
 
+/** Extracts the help-text block that describes a command-line flag. */
 function optionBlock(help: string, flag: string): string {
   const start = help.indexOf(flag);
   if (start < 0) return '';
@@ -63,6 +68,7 @@ function optionBlock(help: string, flag: string): string {
   return help.slice(start, end < 0 ? undefined : end);
 }
 
+/** Discovers Claude model aliases and effort levels from CLI help output. */
 export function parseClaudeHelp(help: string, configured: string[] = []): AgentCapabilities {
   const modelBlock = optionBlock(help, '--model <model>');
   const aliasText = modelBlock.split("or a model's full name")[0] ?? '';
@@ -79,10 +85,12 @@ export function parseClaudeHelp(help: string, configured: string[] = []): AgentC
 }
 
 type CommandReader = (executable: string, args: string[]) => Promise<string>;
+/** Runs an agent command and returns its standard output. */
 const readCommand: CommandReader = (executable, args) => new Promise((resolve, reject) => {
   execFile(executable, args, { maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => error ? reject(error) : resolve(stdout));
 });
 
+/** Discovers locally supported launch models and efforts with safe fallbacks. */
 export async function discoverAgentCapabilities(agent: Agent, executable: string, configured: string[] = [], run: CommandReader = readCommand): Promise<AgentCapabilities> {
   if (agent === 'claude') {
     try { return parseClaudeHelp(await run(executable, ['--help']), configured); }

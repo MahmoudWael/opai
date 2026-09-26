@@ -18,6 +18,7 @@ Usage:
   opai --version        Show the installed version
 `;
 
+/** Parses command-line arguments into OPAI's supported command set. */
 export function parseCliCommand(args: string[]): CliCommand {
   if (!args.length) return { kind: 'interactive' };
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { kind: 'help' };
@@ -32,12 +33,14 @@ export function parseCliCommand(args: string[]): CliCommand {
   throw new Error('Usage: opai [mine | show <id> | resume <id> | init | --help | --version]');
 }
 
+/** Reads and validates the installed package version. */
 export async function packageVersion(packageUrl = new URL('../package.json', import.meta.url)): Promise<string> {
   const value = JSON.parse(await readFile(packageUrl, 'utf8')) as { version?: unknown };
   if (typeof value.version !== 'string') throw new Error('Could not read the installed OPAI version.');
   return value.version;
 }
 
+/** Creates a private configuration file without overwriting an existing one. */
 export async function initializeConfig(destination: string, contents?: string): Promise<void> {
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   try {
